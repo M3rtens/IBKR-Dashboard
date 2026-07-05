@@ -23,7 +23,7 @@ jobs:
       - name: Install test dependencies
         # The full app needs ib_insync/Dash, but the tested modules only
         # need the scientific stack — keep CI fast and network-light.
-        run: pip install pandas numpy scipy pytest
+        run: pip install pandas numpy scipy pytest requests
 
       - name: Run tests
         run: pytest -q
