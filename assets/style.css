@@ -1,0 +1,260 @@
+/* Reset browser defaults that cause white edges and double scrollbars */
+*, *::before, *::after {
+    box-sizing: border-box;
+}
+
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #0a0c10;
+    overflow: hidden;
+}
+
+/* Dash injects these wrapper divs — they must fill the viewport */
+#react-entry-point,
+._dash-app-content {
+    height: 100%;
+}
+
+/* ── Return-basis dropdown ── matches the bench button border style ── */
+#return-basis-wrap .Select-control {
+    height: 31px;
+    min-height: 31px;
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 8px;
+    background: transparent;
+    box-shadow: none;
+    cursor: pointer;
+}
+
+#return-basis-wrap .Select-control:hover,
+#return-basis-wrap .is-focused > .Select-control {
+    border-color: rgba(255,255,255,0.13);
+    background: rgba(255,255,255,0.06);
+}
+
+#return-basis-wrap .Select-value,
+#return-basis-wrap .Select-placeholder {
+    line-height: 29px;
+    padding-left: 9px;
+    padding-right: 26px;
+}
+
+#return-basis-wrap .Select-value-label {
+    color: #9aa0ad !important;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+#return-basis-wrap .Select-arrow {
+    border-color: #6c7280 transparent transparent;
+}
+
+#return-basis-wrap .Select-menu-outer {
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 8px;
+    overflow: hidden;
+    background: #13161d;
+    color: #9aa0ad;
+    margin-top: 6px;
+    box-shadow: 0 12px 28px rgba(0,0,0,0.28);
+}
+
+#return-basis-wrap .VirtualizedSelectOption {
+    background: #13161d;
+    color: #9aa0ad;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: 'JetBrains Mono', monospace;
+}
+
+#return-basis-wrap .VirtualizedSelectFocusedOption {
+    background: rgba(54,211,153,0.13);
+    color: #e8eaef;
+}
+
+/* ── News marquee animation ── */
+@keyframes ticker-scroll {
+    0%   { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+}
+
+.news-col {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.news-item {
+    cursor: pointer;
+}
+
+.news-ticker {
+    overflow: hidden;
+    white-space: nowrap;
+    width: 100%;
+    height: 16px;
+    line-height: 16px;
+}
+
+.news-ticker-inner {
+    display: inline-block;
+    animation: ticker-scroll 10s linear infinite;
+    padding-right: 60px;
+}
+
+.news-date {
+    font-size: 9px;
+    color: #5f6577;
+    margin-top: 2px;
+}
+
+/* ── Plotly graph containers: transparent background ── */
+.js-plotly-plot,
+.plotly,
+.plot-container,
+.main-svg,
+.main-svg .bg {
+    background: transparent !important;
+    fill: transparent !important;
+}
+
+/* ── CGT date pickers ── */
+.cgt-date-picker .DateInput_input {
+    background: transparent !important;
+    border: none !important;
+    padding: 8px 0 !important;
+    font-size: 13px !important;
+    font-family: inherit !important;
+    color: #e8eaef !important;
+    font-weight: 500 !important;
+}
+.cgt-date-picker .DateInput {
+    background: transparent !important;
+    border: none !important;
+    width: 100% !important;
+}
+.cgt-date-picker .SingleDatePickerInput {
+    background: transparent !important;
+    border: none !important;
+}
+.cgt-date-picker .SingleDatePickerInput__withBorder {
+    border: none !important;
+}
+.cgt-date-picker .DateInput_clearDate {
+    display: none !important;
+}
+.cgt-date-picker .CalendarDay__selected {
+    background: #36d399 !important;
+    border-color: #36d399 !important;
+}
+.cgt-date-picker .CalendarDay__selected:hover {
+    background: #2dc88a !important;
+}
+
+/* ── Sidebar collapse toggle ── */
+#sidebar-toggle-btn:hover {
+    background: #1a1f2a !important;
+}
+#sidebar-el, #sidebar-toggle-btn {
+    transition: width 0.2s ease, background 0.15s ease !important;
+}
+
+/* ── Security search results ── */
+.sec-result-row:hover {
+    background: rgba(54,211,153,0.08) !important;
+}
+#sec-search-input::placeholder {
+    color: #6b7280 !important;
+}
+
+/* ── Security detail loading overlay ── */
+@keyframes sec-spin {
+    to { transform: rotate(360deg); }
+}
+.sec-spinner {
+    width: 34px;
+    height: 34px;
+    border: 3px solid rgba(255,255,255,0.10);
+    border-top-color: #36d399;
+    border-radius: 50%;
+    animation: sec-spin 0.75s linear infinite;
+}
+
+/* ── Security detail range buttons ── */
+.sec-range-btn {
+    border: none !important;
+    background: transparent !important;
+    font-family: 'JetBrains Mono', monospace !important;
+    font-size: 11px !important;
+    font-weight: 600 !important;
+    padding: 3px 10px !important;
+    border-radius: 5px !important;
+    cursor: pointer !important;
+    color: #6b7280 !important;
+    transition: all 0.15s !important;
+}
+.sec-range-btn.active {
+    background: rgba(54,211,153,0.15) !important;
+    color: #36d399 !important;
+}
+
+/* ── react-select dropdowns (method / return basis) ── */
+.Select-menu-outer, .VirtualizedSelectOption {
+    background: #1e2330 !important;
+    color: #e8eaef !important;
+}
+.VirtualizedSelectOption:hover, .VirtualizedSelectFocusedOption {
+    background: rgba(54,211,153,0.15) !important;
+    color: #e8eaef !important;
+}
+.Select-value-label, .Select-placeholder {
+    color: #e8eaef !important;
+}
+.Select-input > input {
+    color: #e8eaef !important;
+}
+div[class*="MenuList"] {
+    background: #1e2330 !important;
+}
+div[class*="MenuList"] > div {
+    color: #e8eaef !important;
+}
+div[class*="MenuList"] > div:hover {
+    background: rgba(54,211,153,0.15) !important;
+    color: #e8eaef !important;
+}
+
+/* ── Optimization table scrollbar ── */
+.opt-weights-table::-webkit-scrollbar {
+    width: 5px;
+}
+.opt-weights-table::-webkit-scrollbar-track {
+    background: transparent;
+}
+.opt-weights-table::-webkit-scrollbar-thumb {
+    background: #3a3f4b;
+    border-radius: 4px;
+}
+.opt-weights-table::-webkit-scrollbar-thumb:hover {
+    background: #4a4f5b;
+}
+
+/* ── Optimization table sort buttons ── */
+.opt-sort-btn {
+    transition: color 0.15s;
+}
+.opt-sort-btn:hover {
+    color: #e8eaef !important;
+}
+
+/* ── Markets page instrument tiles ── */
+.mkt-tile {
+    transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.mkt-tile:hover {
+    border-color: rgba(255,255,255,0.14) !important;
+    transform: translateY(-1px);
+}
