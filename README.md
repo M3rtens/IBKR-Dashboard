@@ -7,6 +7,22 @@ It shows account metrics, allocation, per-position P&L and history, plus
 security research, macro and market context, capital-gains reporting and
 portfolio optimisation — auto-refreshing on an interval.
 
+
+
+https://github.com/user-attachments/assets/c487652a-66b7-437e-a4dc-0f892f2f3fa1
+
+<img width="1917" height="1060" alt="Security-1" src="https://github.com/user-attachments/assets/2e4d3133-241f-499d-8fb3-964c5718df9b" />
+
+
+<img width="1917" height="1062" alt="Security-2" src="https://github.com/user-attachments/assets/ed3977df-f0b5-435d-88b6-4df3288bc761" />
+
+<img width="1917" height="1066" alt="Holdings" src="https://github.com/user-attachments/assets/ffa44cd8-b6c5-44ee-8efa-3a6c221fa9b0" />
+
+<img width="1917" height="1065" alt="Backtest" src="https://github.com/user-attachments/assets/3b8c2a9f-bbe9-4d96-a4f3-1c20b6748ea4" />
+
+<img width="1917" height="1062" alt="Optimization" src="https://github.com/user-attachments/assets/9e705207-2d2c-4a3d-b793-9495e82ed89b" />
+
+
 ## Features
 
 - **Dashboard** — account metrics (Net Liquidation, Cash, Unrealised/Realised
