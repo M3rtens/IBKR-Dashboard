@@ -40,4 +40,4 @@ app.layout = shell.build_layout()
 if __name__ == "__main__":
     print(f"Starting IBKR Portfolio Dashboard (demo={DEMO_MODE}, refresh={REFRESH}s)")
     print("Open http://127.0.0.1:8050")
-    app.run(debug=True, host="127.0.0.1", port=8050)
+    app.run(debug=True, host="127.0.0.1", dev_tools_ui=False, port=8050)
