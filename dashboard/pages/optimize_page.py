@@ -74,7 +74,7 @@ def optimize_page():
                         style=dict(background=BG_CARD,border=f"1px solid {BORDER}",
                             borderRadius="14px",padding="20px")),
                 ], style=dict(display="grid",
-                    gridTemplateColumns="minmax(0,1.6fr) minmax(0,1fr)",gap="18px")),
+                    gridTemplateColumns="minmax(0,2.2fr) minmax(0,1fr)",gap="18px")),
                 # Weights comparison table
                 html.Div(id="opt-weights-table-wrap",
                     style=dict(background=BG_CARD,border=f"1px solid {BORDER}",
@@ -401,19 +401,84 @@ def run_optimization(n, method, rf_pct, lookback):
 
     curr_w = np.array([current_weights.get(t, 0) for t in common_tickers])
     ret_curr = float(mean_rets @ curr_w * 252)
+    var_curr = float(curr_w @ (cov_matrix * 252) @ curr_w)
+    vol_curr = np.sqrt(max(var_curr, 0))
+    sharpe_curr = (ret_curr - rf_rate) / vol_curr if vol_curr > 0 else 0
+
+    # Sortino ratio (downside deviation)
+    opt_daily = returns_df[common_tickers].values @ opt_w
+    downside = opt_daily[opt_daily < 0]
+    downside_std = np.sqrt(np.mean(downside ** 2)) * np.sqrt(252) if len(downside) > 0 else 0
+    sortino_opt = (ret_opt - rf_rate) / downside_std if downside_std > 0 else 0
+
+    curr_daily = returns_df[common_tickers].values @ curr_w
+    downside_c = curr_daily[curr_daily < 0]
+    downside_std_c = np.sqrt(np.mean(downside_c ** 2)) * np.sqrt(252) if len(downside_c) > 0 else 0
+    sortino_curr = (ret_curr - rf_rate) / downside_std_c if downside_std_c > 0 else 0
+
+    # Max drawdown
+    cum_opt = np.cumprod(1 + opt_daily)
+    peak_opt = np.maximum.accumulate(cum_opt)
+    mdd_opt = float(np.min((cum_opt - peak_opt) / peak_opt))
+
+    cum_curr = np.cumprod(1 + curr_daily)
+    peak_curr = np.maximum.accumulate(cum_curr)
+    mdd_curr = float(np.min((cum_curr - peak_curr) / peak_curr))
+
+    # Calmar ratio (annual return / |max drawdown|)
+    calmar_opt = ret_opt / abs(mdd_opt) if abs(mdd_opt) > 1e-10 else 0
+    calmar_curr = ret_curr / abs(mdd_curr) if abs(mdd_curr) > 1e-10 else 0
+
+    # Diversification ratio (weighted avg vol / portfolio vol)
+    asset_vols = np.sqrt(np.diag(cov_matrix))
+    div_ratio = float((opt_w @ asset_vols) / vol_opt) if vol_opt > 0 else 1.0
+
+    # Active positions
+    n_active = int(np.sum(opt_w > 0.005))
+
+    # Best / worst day
+    best_day_opt = float(np.max(opt_daily))
+    worst_day_opt = float(np.min(opt_daily))
+
+    def _pct(v):
+        return f"{v*100:.1f}%"
+
+    def _diff(a, b):
+        d = a - b
+        sign = "+" if d >= 0 else ""
+        return f"{sign}{d*100:.1f}%"
 
     stats_rows = [
         _stat_row("Method", METHODS[method][0] if method in METHODS else method),
-        _stat_row("Annual Return", f"{ret_opt*100:.1f}%"),
-        _stat_row("Annual Volatility", f"{vol_opt*100:.1f}%"),
+        _stat_row("Lookback", f"{lookback_days} days"),
+        _stat_row("Holdings", f"{n_active} active / {len(common_tickers)} total"),
+        _stat_row("Risk-Free Rate", _pct(rf_rate)),
+        _stat_row("Annual Return", _pct(ret_opt)),
+        _stat_row("Annual Volatility", _pct(vol_opt)),
         _stat_row("Sharpe Ratio", f"{sharpe_opt:.2f}"),
-        _stat_row("Holdings", str(len(common_tickers))),
-        _stat_row("Risk-Free Rate", f"{rf_rate*100:.1f}%"),
+        _stat_row("Sortino Ratio", f"{sortino_opt:.2f}"),
+        _stat_row("Max Drawdown", _pct(mdd_opt)),
+        _stat_row("Calmar Ratio", f"{calmar_opt:.2f}"),
+        _stat_row("Diversification", f"{div_ratio:.2f}"),
+        _stat_row("Best Day", _pct(best_day_opt)),
+        _stat_row("Worst Day", _pct(worst_day_opt)),
     ]
+    # Current vs Optimized comparison section
+    if vol_curr > 0:
+        stats_rows.append(_stat_row("─" * 20, ""))
+        stats_rows.append(_stat_row("Current Annual Return", _pct(ret_curr)))
+        stats_rows.append(_stat_row("Current Volatility", _pct(vol_curr)))
+        stats_rows.append(_stat_row("Current Sharpe", f"{sharpe_curr:.2f}"))
+        stats_rows.append(_stat_row("Current Sortino", f"{sortino_curr:.2f}"))
+        stats_rows.append(_stat_row("Current Max DD", _pct(mdd_curr)))
+        stats_rows.append(_stat_row("Current Calmar", f"{calmar_curr:.2f}"))
+        stats_rows.append(_stat_row("Return Diff", _diff(ret_opt, ret_curr)))
+        stats_rows.append(_stat_row("Vol Diff", _diff(vol_opt, vol_curr)))
+        stats_rows.append(_stat_row("Sharpe Diff", f"{sharpe_opt - sharpe_curr:+.2f}"))
     stats_card = html.Div([
         html.Div("Optimization Stats", style=dict(
             fontSize="13px",fontWeight="600",color=T2,marginBottom="12px")),
-        html.Div(stats_rows),
+        html.Div(stats_rows, style=dict(maxHeight="calc(100vh - 200px)",overflowY="auto")),
     ])
 
     method_name = METHODS[method][0] if method in METHODS else method
