@@ -39,6 +39,7 @@ from dashboard.pages.macro_page import macro_page
 from dashboard.pages.markets_page import markets_page
 from dashboard.pages.performance_page import performance_page
 from dashboard.pages.backtest_page import backtest_page
+from dashboard.pages.dcf_page import dcf_page
 
 
 # --- Nav item helper -------------------------------------------------
@@ -181,6 +182,8 @@ def main_content():
                      style=dict(display="none")),
             html.Div(id="backtest-page", children=backtest_page(),
                      style=dict(display="none")),
+            html.Div(id="dcf-page", children=dcf_page(),
+                     style=dict(display="none")),
         ]),
         # Right-edge circle: dashboard → macro
         html.Div([_icon(_ICO_CHEVRON_RIGHT)],
@@ -297,6 +300,7 @@ _NAV_ICONS = {
     Output("markets-page","style"),
     Output("performance-page","style"),
     Output("backtest-page","style"),
+    Output("dcf-page","style"),
     Input("nav-dashboard","n_clicks"),
     Input("nav-search","n_clicks"),
     Input("nav-holdings","n_clicks"),
@@ -307,21 +311,28 @@ _NAV_ICONS = {
     Input("nav-macro","n_clicks"),
     Input("nav-markets","n_clicks"),
     Input("sec-detail-store","data"),
+    Input("dcf-ticker-store","data"),
     prevent_initial_call=True,
 )
 def navigate(*args):
     from dash import ctx
     triggered = ctx.triggered_id
     if not triggered:
-        return (no_update,) * 30
+        return (no_update,) * 31
     if triggered == "sec-detail-store":
-        sec_val = args[-1] if args else None
+        sec_val = args[-2] if len(args) >= 2 else None
         print(f"[NAV] sec-detail-store triggered, value={sec_val!r}")
         if not sec_val:
             print("[NAV] sec-detail-store is empty, staying on current page")
-            return (no_update,) * 30
+            return (no_update,) * 31
         page = "security"
         print(f"[NAV] navigating to security page for: {sec_val}")
+    elif triggered == "dcf-ticker-store":
+        dcf_val = args[-1] if args else None
+        if not dcf_val:
+            return (no_update,) * 31
+        page = "dcf"
+        print(f"[NAV] navigating to DCF page for: {dcf_val}")
     else:
         page = triggered
         print(f"[NAV] triggered: {triggered}, page={page}")
@@ -355,9 +366,11 @@ def navigate(*args):
     markets_style = dict() if page == "nav-markets"  else dict(display="none")
     perf_style   = dict() if page == "nav-performance" else dict(display="none")
     back_style   = dict() if page == "nav-backtest"    else dict(display="none")
+    dcf_style    = dict() if page == "dcf"             else dict(display="none")
     return (page, title, *nav_styles, *icon_srcs,
             dash_style, search_style, hold_style, cgt_style, sec_style,
-            opt_style, macro_style, markets_style, perf_style, back_style)
+            opt_style, macro_style, markets_style, perf_style, back_style,
+            dcf_style)
 
 
 @app.callback(

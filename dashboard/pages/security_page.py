@@ -65,6 +65,7 @@ def security_page():
     sec_kalman_store = dcc.Store(id="sec-kalman-store", data=False)
     fin_stmt_store  = dcc.Store(id="fin-stmt-store",  data="income")
     fin_period_store = dcc.Store(id="fin-period-store", data="annual")
+    dcf_ticker_store = dcc.Store(id="dcf-ticker-store")
 
     def _toggle_group(*buttons):
         return html.Div(buttons, style=dict(
@@ -77,6 +78,7 @@ def security_page():
         sec_kalman_store,
         fin_stmt_store,
         fin_period_store,
+        dcf_ticker_store,
         # ── Header ──
         html.Div([
             html.Div([
@@ -88,6 +90,9 @@ def security_page():
             ], style=dict(flex="1")),
             html.Div(id="sec-price-header"),
             html.Div(id="sec-position-badge"),
+            html.Button("DCF Model", id="sec-dcf-btn", n_clicks=0,
+                className="sec-range-btn",
+                style=dict(fontSize="11px")),
         ], style=dict(display="flex", alignItems="center", gap="28px")),
         # ── Valuation metric cards ──
         html.Div(id="sec-price-cards",
@@ -948,3 +953,15 @@ def on_sec_range_change(range_val, symbol, kalman):
     return _build_candlestick_chart(
         bar_map.get(range_val, d.get("daily_1y", [])),
         trades=trades, kalman=bool(kalman), ccy=ccy)
+
+
+# ── DCF button → store ticker ────────────────────────────────────────
+
+@app.callback(
+    Output("dcf-ticker-store", "data"),
+    Input("sec-dcf-btn", "n_clicks"),
+    State("sec-detail-store", "data"),
+    prevent_initial_call=True,
+)
+def _open_dcf(_n, symbol):
+    return symbol
