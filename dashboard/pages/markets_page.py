@@ -19,6 +19,7 @@ so the page fills itself in without a manual browser refresh.
 """
 
 import datetime
+from collections import OrderedDict
 
 from dash import dcc, html, Input, Output, State, ALL, ctx, no_update
 
@@ -41,78 +42,78 @@ _INTERVAL_IDLE    = 600_000  # tab not visible — near-dormant (see refresh_mar
 # how the latest level is formatted for display.
 _GROUPS = [
     ("Equity Indices", [
-        ("^GSPC",     "S&P 500",       "index"),
-        ("^IXIC",     "Nasdaq Comp",   "index"),
-        ("^DJI",      "Dow Jones",     "index"),
-        ("^RUT",      "Russell 2000",  "index"),
-        ("^AXJO",     "ASX 200",       "index"),
-        ("^AORD",     "ASX All Ords",  "index"),
-        ("^FTSE",     "FTSE 100",      "index"),
-        ("^GDAXI",    "DAX",           "index"),
-        ("^FCHI",     "CAC 40",        "index"),
-        ("^STOXX50E", "Euro Stoxx 50", "index"),
-        ("^SSMI",     "SMI",           "index"),
-        ("^N225",     "Nikkei 225",    "index"),
-        ("^HSI",      "Hang Seng",     "index"),
-        ("000001.SS", "Shanghai Comp", "index"),
-        ("^KS11",     "KOSPI",         "index"),
-        ("^BSESN",    "Sensex",        "index"),
-        ("^GSPTSE",   "TSX Comp",      "index"),
-        ("^BVSP",     "Bovespa",       "index"),
+        ("^GSPC",     "S&P 500",       "index", "US"),
+        ("^IXIC",     "Nasdaq Comp",   "index", "US"),
+        ("^DJI",      "Dow Jones",     "index", "US"),
+        ("^RUT",      "Russell 2000",  "index", "US"),
+        ("^GSPTSE",   "TSX Comp",      "index", "Americas"),
+        ("^BVSP",     "Bovespa",       "index", "Americas"),
+        ("^FTSE",     "FTSE 100",      "index", "Europe"),
+        ("^GDAXI",    "DAX",           "index", "Europe"),
+        ("^FCHI",     "CAC 40",        "index", "Europe"),
+        ("^STOXX50E", "Euro Stoxx 50", "index", "Europe"),
+        ("^SSMI",     "SMI",           "index", "Europe"),
+        ("^AXJO",     "ASX 200",       "index", "Asia-Pacific"),
+        ("^AORD",     "ASX All Ords",  "index", "Asia-Pacific"),
+        ("^N225",     "Nikkei 225",    "index", "Asia-Pacific"),
+        ("^HSI",      "Hang Seng",     "index", "Asia-Pacific"),
+        ("000001.SS", "Shanghai Comp", "index", "Asia-Pacific"),
+        ("^KS11",     "KOSPI",         "index", "Asia-Pacific"),
+        ("^BSESN",    "Sensex",        "index", "Asia-Pacific"),
     ]),
     ("Rates & Volatility", [
-        ("^IRX", "US 13W Bill",  "rate"),
-        ("^FVX", "US 5Y Yield",  "rate"),
-        ("^TNX", "US 10Y Yield", "rate"),
-        ("^TYX", "US 30Y Yield", "rate"),
-        ("^VIX", "VIX",          "level"),
-        ("^VXN", "VXN (Nasdaq)", "level"),
+        ("^IRX", "US 13W Bill",  "rate", "US Yields"),
+        ("^FVX", "US 5Y Yield",  "rate", "US Yields"),
+        ("^TNX", "US 10Y Yield", "rate", "US Yields"),
+        ("^TYX", "US 30Y Yield", "rate", "US Yields"),
+        ("^VIX", "VIX",          "level", "Volatility"),
+        ("^VXN", "VXN (Nasdaq)", "level", "Volatility"),
     ]),
     ("Commodities", [
-        ("GC=F", "Gold",        "usd2"),
-        ("SI=F", "Silver",      "usd2"),
-        ("PL=F", "Platinum",    "usd2"),
-        ("PA=F", "Palladium",   "usd2"),
-        ("HG=F", "Copper",      "usd2"),
-        ("CL=F", "WTI Crude",   "usd2"),
-        ("BZ=F", "Brent Crude", "usd2"),
-        ("NG=F", "Nat Gas",     "usd2"),
-        ("RB=F", "Gasoline",    "usd2"),
-        ("HO=F", "Heating Oil", "usd2"),
-        ("ZC=F", "Corn",        "px2"),
-        ("ZW=F", "Wheat",       "px2"),
-        ("ZS=F", "Soybeans",    "px2"),
-        ("SB=F", "Sugar",       "px2"),
-        ("KC=F", "Coffee",      "px2"),
-        ("CT=F", "Cotton",      "px2"),
-        ("CC=F", "Cocoa",       "px2"),
-        ("LE=F", "Live Cattle", "px2"),
+        ("GC=F", "Gold",        "usd2", "Precious Metals"),
+        ("SI=F", "Silver",      "usd2", "Precious Metals"),
+        ("PL=F", "Platinum",    "usd2", "Precious Metals"),
+        ("PA=F", "Palladium",   "usd2", "Precious Metals"),
+        ("HG=F", "Copper",      "usd2", "Industrial Metals"),
+        ("CL=F", "WTI Crude",   "usd2", "Energy"),
+        ("BZ=F", "Brent Crude", "usd2", "Energy"),
+        ("NG=F", "Nat Gas",     "usd2", "Energy"),
+        ("RB=F", "Gasoline",    "usd2", "Energy"),
+        ("HO=F", "Heating Oil", "usd2", "Energy"),
+        ("ZC=F", "Corn",        "px2", "Agriculture"),
+        ("ZW=F", "Wheat",       "px2", "Agriculture"),
+        ("ZS=F", "Soybeans",    "px2", "Agriculture"),
+        ("SB=F", "Sugar",       "px2", "Agriculture"),
+        ("KC=F", "Coffee",      "px2", "Agriculture"),
+        ("CT=F", "Cotton",      "px2", "Agriculture"),
+        ("CC=F", "Cocoa",       "px2", "Agriculture"),
+        ("LE=F", "Live Cattle", "px2", "Agriculture"),
     ]),
     ("Currencies", [
-        ("DX-Y.NYB", "US Dollar Index", "level"),
-        ("AUDUSD=X", "AUD/USD",         "fx4"),
-        ("EURUSD=X", "EUR/USD",         "fx4"),
-        ("GBPUSD=X", "GBP/USD",         "fx4"),
-        ("NZDUSD=X", "NZD/USD",         "fx4"),
-        ("USDJPY=X", "USD/JPY",         "fx2"),
-        ("USDCAD=X", "USD/CAD",         "fx4"),
-        ("USDCHF=X", "USD/CHF",         "fx4"),
-        ("USDCNY=X", "USD/CNY",         "fx4"),
-        ("EURGBP=X", "EUR/GBP",         "fx4"),
-        ("EURJPY=X", "EUR/JPY",         "fx2"),
-        ("AUDJPY=X", "AUD/JPY",         "fx2"),
+        ("DX-Y.NYB", "US Dollar Index", "level", "Index"),
+        ("AUDUSD=X", "AUD/USD",         "fx4", "Majors"),
+        ("EURUSD=X", "EUR/USD",         "fx4", "Majors"),
+        ("GBPUSD=X", "GBP/USD",         "fx4", "Majors"),
+        ("NZDUSD=X", "NZD/USD",         "fx4", "Majors"),
+        ("USDJPY=X", "USD/JPY",         "fx2", "Majors"),
+        ("USDCAD=X", "USD/CAD",         "fx4", "Majors"),
+        ("USDCHF=X", "USD/CHF",         "fx4", "Majors"),
+        ("USDCNY=X", "USD/CNY",         "fx4", "Majors"),
+        ("EURGBP=X", "EUR/GBP",         "fx4", "Crosses"),
+        ("EURJPY=X", "EUR/JPY",         "fx2", "Crosses"),
+        ("AUDJPY=X", "AUD/JPY",         "fx2", "Crosses"),
     ]),
     ("Crypto", [
-        ("BTC-USD",  "Bitcoin",   "usdc"),
-        ("ETH-USD",  "Ethereum",  "usdc"),
-        ("BNB-USD",  "BNB",       "usd2"),
-        ("SOL-USD",  "Solana",    "usd2"),
-        ("XRP-USD",  "XRP",       "usd4"),
-        ("ADA-USD",  "Cardano",   "usd4"),
-        ("AVAX-USD", "Avalanche", "usd2"),
-        ("LINK-USD", "Chainlink", "usd2"),
-        ("LTC-USD",  "Litecoin",  "usd2"),
-        ("DOGE-USD", "Dogecoin",  "usd4"),
+        ("BTC-USD",  "Bitcoin",   "usdc", "Large Cap"),
+        ("ETH-USD",  "Ethereum",  "usdc", "Large Cap"),
+        ("BNB-USD",  "BNB",       "usd2", "Large Cap"),
+        ("SOL-USD",  "Solana",    "usd2", "Large Cap"),
+        ("XRP-USD",  "XRP",       "usd4", "Large Cap"),
+        ("ADA-USD",  "Cardano",   "usd4", "Altcoins"),
+        ("AVAX-USD", "Avalanche", "usd2", "Altcoins"),
+        ("LINK-USD", "Chainlink", "usd2", "Altcoins"),
+        ("LTC-USD",  "Litecoin",  "usd2", "Altcoins"),
+        ("DOGE-USD", "Dogecoin",  "usd4", "Altcoins"),
     ]),
 ]
 
@@ -304,6 +305,23 @@ def _header_row(title: str, spec: dict = None):
     return html.Div(cells, style=dict(
         display="grid", gridTemplateColumns=_COLS, gap="12px",
         padding="0 4px 10px", borderBottom=f"1px solid {BORDER}"))
+
+
+def _subgroup_hdr(text, count):
+    """Thin sub-section divider row inside a group table."""
+    return html.Div([
+        html.Div([
+            html.Span("— ", style=dict(color=T5)),
+            html.Span(text.upper(), style=dict(
+                fontSize="9.5px", fontWeight="700", color=T4,
+                letterSpacing="0.8px")),
+            html.Span(f"  {count}", style=dict(
+                fontSize="9px", fontWeight="700", color=T5,
+                fontFamily="'JetBrains Mono',monospace")),
+        ], style=dict(gridColumn="1 / -1", padding="10px 4px 3px",
+                      borderTop="1px solid rgba(255,255,255,0.04)",
+                      display="flex", alignItems="center", gap="6px")),
+    ], style=dict(display="grid", gridTemplateColumns=_COLS))
 
 
 _MONO = "'JetBrains Mono',monospace"
@@ -540,7 +558,7 @@ def _build_summary(sort_state: dict = None):
     the YTD column.
     """
     sort_state = sort_state or {}
-    all_tickers = [t for _, rows in _GROUPS for t, _, _ in rows]
+    all_tickers = [t for _, rows in _GROUPS for t, _, _, _ in rows]
     closes_by_t = market_data.get_closes(all_tickers, period="1y")
     try:
         ytd_by_t = market_data.get_closes(all_tickers, period="ytd")
@@ -552,17 +570,33 @@ def _build_summary(sort_state: dict = None):
 
     blocks = []
     for title, rows in _GROUPS:
-        recs = [_instrument_rec(label, kind,
+        # Build records with sub-group info
+        recs = []
+        for ticker, label, kind, sub in rows:
+            r = _instrument_rec(label, kind,
                                 closes_by_t.get(ticker) or [],
                                 ytd_by_t.get(ticker) or [])
-                for ticker, label, kind in rows]
+            r["sub"] = sub
+            recs.append(r)
+
         spec = sort_state.get(title)
         recs = _sort_recs(recs, spec)
-        table_rows = [_table_row(r["label"], r["kind"], r["closes"], r["ytd_closes"])
-                      for r in recs]
+
+        # Partition by sub-group while preserving sort order
+        sub_groups = OrderedDict()
+        for r in recs:
+            sub_groups.setdefault(r["sub"], []).append(r)
+
+        # Build table rows with sub-group headers
+        table_rows = []
+        for sub_name, sub_recs in sub_groups.items():
+            if len(sub_groups) > 1:
+                table_rows.append(_subgroup_hdr(sub_name, len(sub_recs)))
+            for r in sub_recs:
+                table_rows.append(_table_row(r["label"], r["kind"],
+                                             r["closes"], r["ytd_closes"]))
+
         metrics = [dict(label=r["label"], d1=r["d1"]) for r in recs]
-        # Each asset class gets its own narrative summary card directly above
-        # its data table.
         blocks.append(_group_banner(title, metrics))
         blocks.append(_group_table(title, table_rows, metrics, spec))
 
