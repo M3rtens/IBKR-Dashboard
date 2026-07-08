@@ -483,25 +483,25 @@ def performance_page():
             gap="14px")),
         _growth_card(),
         html.Div([
-            _card([
-                html.Div([
-                    html.Div("Drawdown", style=dict(fontSize="14px", fontWeight="600",
-                        fontFamily="'Space Grotesk',sans-serif")),
-                    html.Div(id="perf-dd-max", style=dict(marginLeft="auto",
-                        fontSize="12.5px", color=T4)),
-                ], style=dict(display="flex", alignItems="baseline")),
-                html.Div(dcc.Graph(id="perf-dd-chart",
-                                   config={"displayModeBar": False},
-                                   style={"height": "150px"}),
-                         style=dict(marginTop="10px")),
-            ], pad="20px 20px 14px"),
-            _card(html.Div(id="perf-risk", children=_loading())),
-        ], style=dict(display="grid",
-                      gridTemplateColumns="minmax(0,1.55fr) minmax(0,1fr)",
-                      gap="18px", alignItems="start")),
-        html.Div([
-            _card(html.Div(id="perf-heatmap", children=_loading())),
-            _card(html.Div(id="perf-attribution", children=_loading())),
+            html.Div([
+                _card([
+                    html.Div([
+                        html.Div("Drawdown", style=dict(fontSize="14px", fontWeight="600",
+                            fontFamily="'Space Grotesk',sans-serif")),
+                        html.Div(id="perf-dd-max", style=dict(marginLeft="auto",
+                            fontSize="12.5px", color=T4)),
+                    ], style=dict(display="flex", alignItems="baseline")),
+                    html.Div(dcc.Graph(id="perf-dd-chart",
+                                       config={"displayModeBar": False},
+                                       style={"height": "150px"}),
+                             style=dict(marginTop="10px")),
+                ], pad="20px 20px 14px"),
+                _card(html.Div(id="perf-heatmap", children=_loading())),
+            ], style=dict(display="flex", flexDirection="column", gap="18px")),
+            html.Div([
+                _card(html.Div(id="perf-risk", children=_loading())),
+                _card(html.Div(id="perf-attribution", children=_loading())),
+            ], style=dict(display="flex", flexDirection="column", gap="18px")),
         ], style=dict(display="grid",
                       gridTemplateColumns="minmax(0,1.55fr) minmax(0,1fr)",
                       gap="18px", alignItems="start")),
