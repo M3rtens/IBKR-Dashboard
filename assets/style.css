@@ -298,7 +298,14 @@ div[class*="MenuList"] > div:hover {
 .dcf-input::placeholder {
     color: #5b616e !important;
 }
-.dcf-input::-webkit-inner-spin-button,
-.dcf-input::-webkit-outer-spin-button {
-    opacity: 0.3 !important;
+
+/* Hide number input spinners (up/down arrows) globally for DCF inputs */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none !important;
+    margin: 0 !important;
+}
+input[type="number"] {
+    -moz-appearance: textfield !important;
+    appearance: textfield !important;
 }
