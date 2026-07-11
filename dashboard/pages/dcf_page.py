@@ -1,6 +1,15 @@
-"""DCF Model page – editable projection table with valuation summary."""
+"""DCF Model page — driver-based unlevered FCFF valuation.
 
-import time
+The model values the enterprise by projecting unlevered free cash flow to the
+firm (FCFF) off a small set of drivers, discounting at WACC, and adding a
+Gordon-growth terminal value. Financing flows (dividends, buybacks, debt
+issuance) are deliberately excluded — FCFF is measured before returns to
+capital providers, and the capital structure is already priced in through WACC.
+
+Flow:  select security → seed assumptions & drivers from yfinance historicals →
+analyst overrides any driver → live recompute of the FCFF build, the EV→equity
+bridge, and a WACC × terminal-growth sensitivity grid.
+"""
 
 from dash import dcc, html, Input, Output, State, no_update, ALL
 
@@ -9,36 +18,69 @@ from dashboard.theme import BG_CARD, BORDER, ACCENT, RED, T1, T2, T3, T4, T5
 from dashboard.formatters import ccy_symbol
 
 
-# ── yfinance fetch (reuses security_page cache when possible) ────────
+# ── yfinance fetch ───────────────────────────────────────────────────
 
 def _fetch_yf_info(symbol: str) -> dict:
     try:
         import yfinance as yf
         t = yf.Ticker(symbol)
-        info = t.info or {}
-        income = t.income_stmt
-        balance = t.balance_sheet
-        cashflow = t.cashflow
-        return {"info": info, "income": income, "balance": balance, "cashflow": cashflow}
+        return {
+            "info":     t.info or {},
+            "income":   t.income_stmt,
+            "balance":  t.balance_sheet,
+            "cashflow": t.cashflow,
+        }
     except Exception:
         return {}
 
 
 def _df_val(df, *names):
-    """Get the most recent value from a yfinance DataFrame for one of the given row names."""
+    """Most recent value from a yfinance statement for the first matching row."""
     if df is None or (hasattr(df, "empty") and df.empty):
         return None
     for n in names:
         if n in df.index:
             row = df.loc[n]
             if len(row) > 0:
-                return float(row.iloc[0])
+                try:
+                    return float(row.iloc[0])
+                except (TypeError, ValueError):
+                    return None
     return None
+
+
+def _df_val_at(df, col_idx, *names):
+    """Value at a given column index (0 = most recent) for the first match."""
+    if df is None or (hasattr(df, "empty") and df.empty):
+        return None
+    for n in names:
+        if n in df.index:
+            row = df.loc[n]
+            if len(row) > col_idx:
+                try:
+                    return float(row.iloc[col_idx])
+                except (TypeError, ValueError):
+                    return None
+    return None
+
+
+def _safe(v, default):
+    """Coerce to a finite float, falling back to ``default`` for None/NaN."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if f == f else default   # NaN is truthy, so guard it explicitly
+
+
+def _year_labels(base_year, n):
+    """Projection year captions, e.g. 2027 E … relative to the last actuals."""
+    return [f"{base_year + i + 1} E" for i in range(n)]
 
 
 # ── Formatters ───────────────────────────────────────────────────────
 
-def _fmt_money(v, sym="$"):
+def _fmt_money(v, sym="$", dp=None):
     try:
         f = float(v)
     except (TypeError, ValueError):
@@ -51,520 +93,599 @@ def _fmt_money(v, sym="$"):
     if a >= 1e9:  return f"{sign}{sym}{a/1e9:.2f}B"
     if a >= 1e6:  return f"{sign}{sym}{a/1e6:.1f}M"
     if a >= 1e3:  return f"{sign}{sym}{a/1e3:.1f}K"
-    return f"{sign}{sym}{a:.2f}"
+    return f"{sign}{sym}{a:.{dp if dp is not None else 0}f}"
 
 
-def _fmt_plain(v):
+def _fmt_pct(v, dp=1, signed=False):
     try:
         f = float(v)
     except (TypeError, ValueError):
         return "—"
     if f != f:
         return "—"
-    return f"{f:,.0f}"
+    sign = ("+" if f > 0 else ("-" if f < 0 else "")) if signed else ("-" if f < 0 else "")
+    return f"{sign}{abs(f):.{dp}f}%"
+
+
+def _fmt_price(v, sym="$"):
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if f != f:
+        return "—"
+    return f"{'-' if f < 0 else ''}{sym}{abs(f):,.2f}"
+
+
+# ── Shared style tokens & builders ───────────────────────────────────
+
+MONO = "'JetBrains Mono', monospace"
+SANS = "'Space Grotesk', sans-serif"
+
+CARD_STYLE = dict(background=BG_CARD, border=f"1px solid {BORDER}",
+                  borderRadius="14px", padding="20px")
+FIELD_LABEL = dict(fontSize="10.5px", color=T4, fontWeight="500",
+                   letterSpacing="0.3px")
+
+
+def _card(children, **overrides):
+    return html.Div(children, style={**CARD_STYLE, **overrides})
+
+
+def _section_title(text, **overrides):
+    style = dict(fontSize="13px", fontWeight="600", color=T2, marginBottom="14px")
+    style.update(overrides)
+    return html.Div(text, style=style)
+
+
+def _toggle_group(*buttons):
+    return html.Div(buttons, style=dict(
+        display="flex", gap="2px", background="rgba(255,255,255,0.04)",
+        borderRadius="7px", padding="2px"))
+
+
+def _num_input(input_id, value=None, placeholder="", step=0.1, width="100%"):
+    return dcc.Input(
+        id=input_id, type="number", placeholder=placeholder, value=value,
+        debounce=True, step=step,
+        style=dict(
+            background="rgba(255,255,255,0.04)",
+            border="1px solid rgba(255,255,255,0.08)",
+            borderRadius="5px", color=T1, fontFamily=MONO,
+            fontSize="12.5px", padding="6px 8px", width=width,
+            textAlign="right", outline="none"))
+
+
+def _stat_tile(label, value, color=T1, sub=None):
+    body = [
+        html.Div(label, style=FIELD_LABEL),
+        html.Div(value, style=dict(
+            fontSize="18px", fontWeight="600", color=color,
+            fontFamily=MONO, marginTop="4px")),
+    ]
+    if sub:
+        body.append(html.Div(sub, style=dict(
+            fontSize="10px", color=T5, marginTop="2px")))
+    return html.Div(body, style=dict(flex="1", minWidth="120px"))
+
+
+# ── Assumption + driver definitions ──────────────────────────────────
+
+# (label, input_id, default, step, placeholder)
+_ASSUMPTION_FIELDS = [
+    ("WACC (%)",            "dcf-wacc",     9.0,  0.1, "9.0"),
+    ("Terminal Growth (%)", "dcf-tgr",      2.5,  0.1, "2.5"),
+    ("Tax Rate (%)",        "dcf-tax",      25.0, 0.5, "25.0"),
+    ("Shares Out (M)",      "dcf-shares",   1000, 1,   "1000"),
+    ("Net Debt (M)",        "dcf-net-debt", 0,    1,   "0"),
+]
+
+# (driver_id, label, seed_key)  — seed_key indexes the model store's seed block.
+_DRIVERS = [
+    ("rev-growth",  "Revenue growth",  "growth"),
+    ("ebit-margin", "EBIT margin",     "margin"),
+    ("da-pct",      "D&A (% rev)",     "da"),
+    ("capex-pct",   "CapEx (% rev)",   "capex"),
+    ("nwc-pct",     "ΔNWC (% rev)",    "nwc"),
+]
+
+_PERIODS = {"3Y": 3, "5Y": 5, "10Y": 10}
+
+LABEL_W = "150px"
+HIST_W = "70px"
 
 
 # ── Layout ───────────────────────────────────────────────────────────
 
-def _toggle_group(*buttons):
-    return html.Div(buttons, style=dict(
-        display="flex", gap="2px",
-        background="rgba(255,255,255,0.04)",
-        borderRadius="7px", padding="2px"))
-
-
-def _input_cell(placeholder, value=None, input_id=None):
-    return dcc.Input(
-        id=input_id, type="number", placeholder=placeholder,
-        value=value, debounce=True, step=1,
-        style=dict(
-            background="rgba(255,255,255,0.04)",
-            border="1px solid rgba(255,255,255,0.08)",
-            borderRadius="5px",
-            color=T1,
-            fontFamily="'JetBrains Mono',monospace",
-            fontSize="12.5px",
-            padding="6px 8px",
-            width="100%",
-            textAlign="right",
-            outline="none"),
-    )
-
-
-def _calc_cell(text):
-    return html.Div(text, style=dict(
-        fontSize="12.5px", color=T2, textAlign="right",
-        fontFamily="'JetBrains Mono',monospace",
-        padding="6px 8px"))
-
-
 def dcf_page():
     period_store = dcc.Store(id="dcf-period-store", data="5Y")
-    stmt_store = dcc.Store(id="dcf-stmt-store", data="income")
+    model_store = dcc.Store(id="dcf-model-store")   # seeds + base revenue + fx
 
-    # ── Assumptions card ──
-    assumptions_card = html.Div([
-        html.Div("Assumptions", style=dict(
-            fontSize="13px", fontWeight="600", color=T2, marginBottom="14px")),
+    # ── Header ──
+    header = html.Div([
         html.Div([
-            html.Div([
-                html.Div("WACC (%)", style=dict(fontSize="10.5px", color=T4,
-                    fontWeight="500", letterSpacing="0.3px", marginBottom="6px")),
-                _input_cell("10.0", value=10, input_id="dcf-wacc"),
-            ], style=dict(flex="1")),
-            html.Div([
-                html.Div("Terminal Growth (%)", style=dict(fontSize="10.5px", color=T4,
-                    fontWeight="500", letterSpacing="0.3px", marginBottom="6px")),
-                _input_cell("2.5", value=2.5, input_id="dcf-tgr"),
-            ], style=dict(flex="1")),
-            html.Div([
-                html.Div("Tax Rate (%)", style=dict(fontSize="10.5px", color=T4,
-                    fontWeight="500", letterSpacing="0.3px", marginBottom="6px")),
-                _input_cell("25.0", value=25, input_id="dcf-tax"),
-            ], style=dict(flex="1")),
-            html.Div([
-                html.Div("Shares Out (M)", style=dict(fontSize="10.5px", color=T4,
-                    fontWeight="500", letterSpacing="0.3px", marginBottom="6px")),
-                _input_cell("1000", value=1000, input_id="dcf-shares"),
-            ], style=dict(flex="1")),
-            html.Div([
-                html.Div("Net Debt (M)", style=dict(fontSize="10.5px", color=T4,
-                    fontWeight="500", letterSpacing="0.3px", marginBottom="6px")),
-                _input_cell("0", value=0, input_id="dcf-net-debt"),
-            ], style=dict(flex="1")),
-        ], style=dict(display="flex", gap="14px")),
-    ], style=dict(
-        background=BG_CARD, border=f"1px solid {BORDER}",
-        borderRadius="14px", padding="20px"))
+            html.Div(id="dcf-ticker-name", style=dict(
+                fontFamily=SANS, fontSize="22px", fontWeight="600",
+                letterSpacing="0.2px")),
+            html.Div("DCF Model · Unlevered FCFF", style=dict(
+                fontSize="13px", color=T4, marginTop="2px")),
+        ], style=dict(flex="1")),
+        html.Div(id="dcf-header-verdict", style=dict(
+            display="flex", gap="22px", alignItems="center")),
+        html.Button("Back", id="dcf-back-btn", n_clicks=0,
+            className="sec-range-btn", style=dict(fontSize="12px")),
+    ], style=dict(display="flex", alignItems="center", gap="24px",
+                  marginBottom="4px"))
 
-    # ── Period toggle ──
+    # ── Assumptions + period ──
+    def _field(label, input_id, value, step, placeholder):
+        return html.Div([
+            html.Div(label, style={**FIELD_LABEL, "marginBottom": "6px"}),
+            _num_input(input_id, value=value, placeholder=placeholder, step=step),
+        ], style=dict(flex="1", minWidth="110px"))
+
     period_toggle = html.Div([
-        html.Div("Projection Period", style=dict(
-            fontSize="13px", fontWeight="600", color=T2, marginRight="14px")),
-        _toggle_group(
-            html.Button("3Y", id={"type": "dcf-period-btn", "index": "3Y"},
-                n_clicks=0, className="sec-range-btn"),
-            html.Button("5Y", id={"type": "dcf-period-btn", "index": "5Y"},
-                n_clicks=0, className="sec-range-btn active"),
-            html.Button("10Y", id={"type": "dcf-period-btn", "index": "10Y"},
-                n_clicks=0, className="sec-range-btn"),
-        ),
+        _section_title("Projection Period", marginBottom="0", marginRight="14px"),
+        _toggle_group(*[
+            html.Button(p, id={"type": "dcf-period-btn", "index": p}, n_clicks=0,
+                className="sec-range-btn" + (" active" if p == "5Y" else ""))
+            for p in _PERIODS
+        ]),
     ], style=dict(display="flex", alignItems="center"))
 
-    # ── Projection table (filled by callback) ──
-    projection_card = html.Div([
+    assumptions_card = _card([
         html.Div([
-            html.Div("Revenue & Cost Projections", style=dict(
-                fontSize="13px", fontWeight="600", color=T2)),
-            _toggle_group(
-                html.Button("Income Statement", id="dcf-stmt-income",
-                    n_clicks=0, className="sec-range-btn active"),
-                html.Button("Balance Sheet",    id="dcf-stmt-balance",
-                    n_clicks=0, className="sec-range-btn"),
-                html.Button("Cash Flow",        id="dcf-stmt-cashflow",
-                    n_clicks=0, className="sec-range-btn"),
-            ),
+            _section_title("Assumptions", marginBottom="0"),
+            period_toggle,
         ], style=dict(display="flex", justifyContent="space-between",
                       alignItems="center", marginBottom="14px")),
+        html.Div([_field(*f) for f in _ASSUMPTION_FIELDS],
+                 style=dict(display="flex", gap="14px", flexWrap="wrap")),
+    ])
+
+    # ── Drivers (grid built by callback) ──
+    drivers_card = _card([
+        _section_title("Projection Drivers"),
+        html.Div(id="dcf-drivers"),
+    ])
+
+    # ── FCFF build (built by callback) ──
+    projection_card = _card([
+        _section_title("Free Cash Flow Build"),
         html.Div(id="dcf-projection-table"),
-    ], style=dict(
-        background=BG_CARD, border=f"1px solid {BORDER}",
-        borderRadius="14px", padding="20px"))
+    ])
 
-    # ── Valuation summary (filled by callback) ──
-    valuation_card = html.Div([
-        html.Div("Valuation Summary", style=dict(
-            fontSize="13px", fontWeight="600", color=T2, marginBottom="14px")),
+    # ── Valuation bridge (built by callback) ──
+    valuation_card = _card([
+        _section_title("Valuation"),
         html.Div(id="dcf-valuation"),
-    ], id="dcf-valuation-card", style=dict(
-        background=BG_CARD, border=f"1px solid {BORDER}",
-        borderRadius="14px", padding="20px", display="none"))
+    ])
 
-    # ── Perform DCF button ──
-    dcf_button = html.Div([
-        html.Button("Perform DCF", id="dcf-perform-btn", n_clicks=0,
-            style=dict(
-                background="rgba(54,211,153,0.15)", color=ACCENT,
-                border="1px solid rgba(54,211,153,0.3)",
-                borderRadius="8px", padding="10px 28px",
-                fontFamily="'Space Grotesk',sans-serif",
-                fontSize="14px", fontWeight="600", cursor="pointer",
-                letterSpacing="0.3px", transition="all 0.15s")),
-    ], style=dict(display="flex", justifyContent="center", marginTop="6px"))
+    # ── Sensitivity (built by callback) ──
+    sensitivity_card = _card([
+        _section_title("Sensitivity — Implied Share Price"),
+        html.Div(id="dcf-sensitivity"),
+    ])
 
     return html.Div([
-        period_store,
-        stmt_store,
-        # ── Header ──
-        html.Div([
-            html.Div([
-                html.Div(id="dcf-ticker-name", style=dict(
-                    fontFamily="'Space Grotesk',sans-serif",
-                    fontSize="22px", fontWeight="600", letterSpacing="0.2px")),
-                html.Div("DCF Model", style=dict(
-                    fontSize="13px", color=T4, marginTop="2px")),
-            ], style=dict(flex="1")),
-            html.Button("Back", id="dcf-back-btn", n_clicks=0,
-                className="sec-range-btn",
-                style=dict(fontSize="12px")),
-        ], style=dict(display="flex", alignItems="center", gap="28px",
-                      marginBottom="6px")),
-        # ── Cards ──
+        period_store, model_store,
+        header,
         assumptions_card,
-        period_toggle,
-        html.Div(style=dict(borderTop=f"1px solid {BORDER}", margin="4px 0")),
+        drivers_card,
         projection_card,
-        valuation_card,
-        dcf_button,
+        html.Div([valuation_card, sensitivity_card], style=dict(
+            display="grid", gridTemplateColumns="minmax(0,1fr) minmax(0,1fr)",
+            gap="18px")),
     ], style=dict(padding="24px 28px 40px", display="flex",
                   flexDirection="column", gap="18px",
                   height="100%", overflowY="auto"))
 
 
-# ── Projection table builder ────────────────────────────────────────
+# ── Core valuation maths ─────────────────────────────────────────────
 
-LABEL_W = "185px"
+def _project(base_rev, drivers, tax, n_years):
+    """Build the per-year FCFF projection.
 
-# Grouped financial statement definitions for DCF input tables
-# Each group: (group_label, [(label, input_id, is_total), ...])
+    ``drivers`` is a dict of lists keyed by driver id, each list length
+    ``n_years`` holding the driver value (in percent) for that year.
+    Returns a list of per-year dicts plus discounting is applied by the caller.
+    """
+    rows = []
+    rev = base_rev
+    for i in range(n_years):
+        g = (drivers["rev-growth"][i] or 0) / 100.0
+        margin = (drivers["ebit-margin"][i] or 0) / 100.0
+        da_p = (drivers["da-pct"][i] or 0) / 100.0
+        capex_p = (drivers["capex-pct"][i] or 0) / 100.0
+        nwc_p = (drivers["nwc-pct"][i] or 0) / 100.0
 
-_INCOME_STMT_ROWS = [
-    ("Revenue", [
-        ("Total Revenue",       "total-revenue",  True,  False),
-        ("Cost of Revenue",     "cogs",           False, False),
-        ("Gross Profit",        "gross-profit",   True,  True),
-    ]),
-    ("Operating Expenses", [
-        ("R&D",                 "rnd",            False, False),
-        ("SG&A",                "sga",            False, False),
-        ("Total Op. Expenses",  "opex",           False, True),
-        ("Operating Income",    "op-income",      True,  True),
-    ]),
-    ("EBITDA / EBIT", [
-        ("EBITDA",              "ebitda",         True,  True),
-        ("Depreciation",        "da",             False, False),
-        ("EBIT",                "ebit",           False, True),
-    ]),
-    ("Below Operating", [
-        ("Interest Income",     "int-income",     False, False),
-        ("Interest Expense",    "int-expense",    False, False),
-        ("Pretax Income",       "pretax",         True,  True),
-    ]),
-    ("Tax & Net Income", [
-        ("Tax Provision",       "tax",            False, False),
-        ("Net Income",          "net-income",     True,  True),
-    ]),
-    ("Per Share", [
-        ("Basic EPS",           "basic-eps",      False, False),
-        ("Diluted EPS",         "diluted-eps",    True,  False),
-        ("Basic Shares",        "basic-shares",   False, False),
-        ("Diluted Shares",      "diluted-shares", False, False),
-    ]),
-]
+        rev = rev * (1 + g)
+        ebit = rev * margin
+        taxes = ebit * tax if ebit > 0 else 0.0
+        nopat = ebit - taxes
+        da = rev * da_p
+        capex = rev * capex_p
+        dnwc = rev * nwc_p
+        fcff = nopat + da - capex - dnwc
 
-_BALANCE_SHEET_ROWS = [
-    ("Current Assets", [
-        ("Cash & ST Investments",  "cash",              False, False),
-        ("Accounts Receivable",    "receivables",       False, False),
-        ("Inventory",              "inventory",         False, False),
-        ("Other Current Assets",   "other-ca",          False, False),
-        ("Total Current Assets",   "total-ca",          True,  True),
-    ]),
-    ("Non-Current Assets", [
-        ("Net PPE",                "ppe",               False, False),
-        ("Investments & Advances", "investments",       False, False),
-        ("Other Non-Curr Assets",  "other-nca",         False, False),
-        ("Total Non-Curr Assets",  "total-nca",         True,  True),
-    ]),
-    ("Total Assets", [
-        ("Total Assets",           "total-assets",      True,  True),
-    ]),
-    ("Current Liabilities", [
-        ("Accounts Payable",       "payables",          False, False),
-        ("Current Debt",           "current-debt",      False, False),
-        ("Other Current Liabs",    "other-cl",          False, False),
-        ("Total Current Liabs",    "total-cl",          True,  True),
-    ]),
-    ("Non-Current Liabilities", [
-        ("Long Term Debt",         "lt-debt",           False, False),
-        ("Other Non-Curr Liabs",   "other-ncl",         False, False),
-        ("Total Non-Curr Liabs",   "total-ncl",         True,  True),
-    ]),
-    ("Total Liabilities & Equity", [
-        ("Total Liabilities",      "total-liab",        True,  True),
-        ("Stockholders Equity",    "equity",            True,  True),
-    ]),
-    ("Key Metrics", [
-        ("Working Capital",        "working-capital",   False, True),
-        ("Net Debt",               "net-debt",          False, True),
-        ("Invested Capital",       "invested-capital",  False, True),
-    ]),
-]
-
-_CASHFLOW_STMT_ROWS = [
-    ("Operating Activities", [
-        ("Net Income",             "cf-net-income",     False, False),
-        ("D&A",                    "cf-da",             False, False),
-        ("Stock-Based Comp.",      "sbc",               False, False),
-        ("Chg Working Capital",    "cf-nwc",            False, False),
-        ("Other Non-Cash",         "cf-other",          False, False),
-        ("Operating Cash Flow",    "ocf",               True,  True),
-    ]),
-    ("Investing Activities", [
-        ("Capital Expenditure",    "capex",             False, False),
-        ("Purchase of PPE",        "purchase-ppe",      False, False),
-        ("Purchase Investments",   "purchase-inv",      False, False),
-        ("Sale of Investments",    "sale-inv",          False, False),
-        ("Investing Cash Flow",    "icf",               True,  True),
-    ]),
-    ("Financing Activities", [
-        ("Dividends Paid",         "dividends",         False, False),
-        ("Stock Repurchases",      "buybacks",          False, False),
-        ("LT Debt Issuance",       "debt-issuance",     False, False),
-        ("LT Debt Repayment",      "debt-repayment",    False, False),
-        ("Net Debt Issuance",      "net-debt-issuance", False, False),
-        ("Financing Cash Flow",    "fcf-total",         True,  True),
-    ]),
-    ("Summary", [
-        ("Free Cash Flow",         "fcf",               True,  True),
-        ("End Cash Position",      "end-cash",          False, True),
-        ("Net Change in Cash",     "net-cash-change",   False, True),
-    ]),
-]
-
-# Percentage-of-parent fields: (child_id, parent_id, pct_label)
-# When a % is entered, the child value = parent * pct / 100
-_PCT_FIELDS = [
-    ("cogs",         "total-revenue", "of Total Revenue"),
-    ("rnd",          "total-revenue", "of Total Revenue"),
-    ("sga",          "total-revenue", "of Total Revenue"),
-    ("opex",         "total-revenue", "of Total Revenue"),
-    ("da",           "total-revenue", "of Total Revenue"),
-    ("int-expense",  "total-revenue", "of Total Revenue"),
-    ("tax",          "total-revenue", "of Total Revenue"),
-    ("payables",     "total-ca",      "of Total Current Assets"),
-    ("receivables",  "total-ca",      "of Total Current Assets"),
-    ("inventory",    "total-ca",      "of Total Current Assets"),
-    ("other-ca",     "total-ca",      "of Total Current Assets"),
-    ("ppe",          "total-nca",     "of Total Non-Curr Assets"),
-    ("investments",  "total-nca",     "of Total Non-Curr Assets"),
-    ("other-nca",    "total-nca",     "of Total Non-Curr Assets"),
-    ("current-debt", "total-cl",      "of Total Current Liabs"),
-    ("other-cl",     "total-cl",      "of Total Current Liabs"),
-    ("lt-debt",      "total-ncl",     "of Total Non-Curr Liabs"),
-    ("other-ncl",    "total-ncl",     "of Total Non-Curr Liabs"),
-    ("cf-net-income","ocf",           "of Operating Cash Flow"),
-    ("cf-da",        "ocf",           "of Operating Cash Flow"),
-    ("sbc",          "ocf",           "of Operating Cash Flow"),
-    ("cf-nwc",       "ocf",           "of Operating Cash Flow"),
-    ("cf-other",     "ocf",           "of Operating Cash Flow"),
-    ("capex",        "icf",           "of Investing Cash Flow"),
-    ("purchase-ppe", "icf",           "of Investing Cash Flow"),
-    ("purchase-inv", "icf",           "of Investing Cash Flow"),
-    ("sale-inv",     "icf",           "of Investing Cash Flow"),
-    ("dividends",    "fcf-total",     "of Financing Cash Flow"),
-    ("buybacks",     "fcf-total",     "of Financing Cash Flow"),
-    ("debt-issuance","fcf-total",     "of Financing Cash Flow"),
-    ("debt-repayment","fcf-total",    "of Financing Cash Flow"),
-]
+        rows.append(dict(
+            revenue=rev, growth=g * 100, ebit=ebit, margin=margin * 100,
+            taxes=taxes, nopat=nopat, da=da, capex=capex, dnwc=dnwc, fcff=fcff))
+    return rows
 
 
-_PCT_MAP = {child: (child, parent, label)
-            for child, parent, label in _PCT_FIELDS}
+def _value(base_rev, drivers, wacc, tgr, tax, shares_m, net_debt_m, n_years):
+    """Full valuation. Returns projection rows and the EV→equity bridge."""
+    rows = _project(base_rev, drivers, tax, n_years)
+
+    pv_fcff = []
+    for i, r in enumerate(rows):
+        df = 1.0 / (1 + wacc) ** (i + 1)
+        r["df"] = df
+        r["pv"] = r["fcff"] * df
+        pv_fcff.append(r["pv"])
+
+    sum_pv = sum(pv_fcff)
+
+    # Terminal value — Gordon growth on the final-year FCFF.
+    if rows and wacc > tgr:
+        tv = rows[-1]["fcff"] * (1 + tgr) / (wacc - tgr)
+    else:
+        tv = 0.0
+    pv_tv = tv * (1.0 / (1 + wacc) ** n_years) if rows else 0.0
+
+    ev = sum_pv + pv_tv
+    # Net debt entered in millions; scale to the statement's absolute units.
+    equity = ev - net_debt_m * 1e6
+    per_share = equity / (shares_m * 1e6) if shares_m else 0.0
+    tv_share = (pv_tv / ev) if ev else 0.0
+
+    return dict(rows=rows, sum_pv=sum_pv, tv=tv, pv_tv=pv_tv, ev=ev,
+                equity=equity, per_share=per_share, tv_share=tv_share)
 
 
-def _year_labels(income_df, n_years):
-    """Generate projection year labels like '2027-12 E' from the most recent statement date."""
+def _implied_price(base_rev, drivers, wacc, tgr, tax, shares_m, net_debt_m, n_years):
+    """Lightweight per-share value for the sensitivity grid."""
+    return _value(base_rev, drivers, wacc, tgr, tax, shares_m,
+                  net_debt_m, n_years)["per_share"]
+
+
+# ── Seed callback: fetch once, populate assumptions + driver seeds ────
+
+@app.callback(
+    Output("dcf-ticker-name", "children"),
+    Output("dcf-model-store", "data"),
+    Output("dcf-wacc", "value"),
+    Output("dcf-tgr", "value"),
+    Output("dcf-tax", "value"),
+    Output("dcf-shares", "value"),
+    Output("dcf-net-debt", "value"),
+    Input("dcf-ticker-store", "data"),
+    prevent_initial_call=True,
+)
+def _seed_model(symbol):
+    if not symbol:
+        return "", None, no_update, no_update, no_update, no_update, no_update
+
+    yf = _fetch_yf_info(symbol)
+    info = yf.get("info", {}) or {}
+    income = yf.get("income")
+    cashflow = yf.get("cashflow")
+
+    name = info.get("longName") or info.get("shortName") or symbol
+    ccy = ccy_symbol(info.get("currency") or info.get("financialCurrency"))
+
+    base_rev = _safe(_df_val(income, "Total Revenue", "Operating Revenue"), 1e9)
+    prev_rev = _safe(_df_val_at(income, 1, "Total Revenue", "Operating Revenue"), 0)
+    ebit = _safe(_df_val(income, "EBIT", "Operating Income"), 0)
+    pretax = _safe(_df_val(income, "Pretax Income", "Pretax Income Loss"), 0)
+    tax_prov = _safe(_df_val(income, "Tax Provision", "Income Tax Expense"), 0)
+    da = _safe(_df_val(cashflow, "Depreciation And Amortization",
+               "Depreciation Amortization Depletion", "Reconciled Depreciation"), 0)
+    capex = _safe(_df_val(cashflow, "Capital Expenditure", "Purchase Of PPE"), 0)
+
+    # Base fiscal year from the most recent actuals column; projections run from
+    # the following year. Fall back to the current calendar year.
     base_year = None
-    if income_df is not None and not (hasattr(income_df, "empty") and income_df.empty):
-        try:
-            base_year = int(str(income_df.columns[0])[:4])
-        except Exception:
-            pass
-    if base_year is None:
-        base_year = 2025
-    return [f"{base_year + i + 1}-12 E" for i in range(n_years)]
+    try:
+        base_year = int(str(income.columns[0])[:4])
+    except Exception:
+        pass
+    if not base_year:
+        import datetime
+        base_year = datetime.datetime.now().year
 
-# Build dynamic callback args for the auto-calc client-side callback
-# Single percentage input per row (applies to all years)
-_PCT_CHILD_IDS = [f"{child}" for child, _, _ in _PCT_FIELDS]
-_PCT_PARENT_IDS = list({parent for _, parent, _ in _PCT_FIELDS})
-# Full per-year IDs for outputs and states
-_PCT_CHILD_IDSFull = [f"{child}-{i}" for child, _, _ in _PCT_FIELDS for i in range(10)]
-_PCT_PARENT_IDSFull = [f"{parent}-{i}" for _, parent, _ in _PCT_FIELDS for i in range(10)]
+    # Historical anchors → sensible default drivers (percent).
+    growth = ((base_rev / prev_rev - 1) * 100) if prev_rev else 6.0
+    growth = max(min(growth, 25.0), 0.0)                      # clamp runaway y/y
+    margin = (ebit / base_rev * 100) if (ebit and base_rev) else 18.0
+    da_pct = (abs(da) / base_rev * 100) if (da and base_rev) else 4.0
+    capex_pct = (abs(capex) / base_rev * 100) if (capex and base_rev) else 5.0
+    eff_tax = (tax_prov / pretax * 100) if (pretax and tax_prov and pretax > 0) else 25.0
+    eff_tax = max(min(eff_tax, 40.0), 0.0)
 
-# Calculated field IDs (displayed as read-only divs, computed by client-side callback)
-_CALC_IDS = [
-    "gross-profit", "opex", "op-income", "ebitda", "ebit", "pretax", "net-income",
-    "total-ca", "total-nca", "total-assets", "total-cl", "total-ncl",
-    "total-liab", "equity", "working-capital", "net-debt", "invested-capital",
-    "ocf", "icf", "fcf-total", "fcf", "end-cash", "net-cash-change",
-]
-_CALC_CHILD_IDS = [f"{cid}-{i}" for cid in _CALC_IDS for i in range(10)]
+    # Assumptions seeded from the info block where available.
+    shares = info.get("sharesOutstanding")
+    shares_m = round(shares / 1e6, 1) if shares else 1000
+    total_debt = info.get("totalDebt") or 0
+    total_cash = info.get("totalCash") or 0
+    net_debt_m = round((total_debt - total_cash) / 1e6, 1)
+    price = info.get("currentPrice") or info.get("regularMarketPrice") or 0
 
-# All input IDs that feed into calculations
-_CALC_INPUT_IDS = [
-    "total-revenue", "cogs", "rnd", "sga", "da", "int-income", "int-expense", "tax",
-    "basic-eps", "diluted-eps", "basic-shares", "diluted-shares",
-    "cash", "receivables", "inventory", "other-ca", "ppe", "investments", "other-nca",
-    "payables", "current-debt", "other-cl", "lt-debt", "other-ncl",
-    "cf-net-income", "cf-da", "sbc", "cf-nwc", "cf-other",
-    "capex", "purchase-ppe", "purchase-inv", "sale-inv",
-    "dividends", "buybacks", "debt-issuance", "debt-repayment", "net-debt-issuance",
-]
-_CALC_INPUT_IDS_FULL = [f"{iid}-{i}" for iid in _CALC_INPUT_IDS for i in range(10)]
+    store = dict(
+        base_rev=base_rev, ccy=ccy, price=price, name=name, base_year=base_year,
+        seed=dict(growth=round(growth, 1), margin=round(margin, 1),
+                  da=round(da_pct, 1), capex=round(capex_pct, 1), nwc=2.0),
+    )
+    #        name              store  wacc       tgr        tax
+    return (f"{name} ({symbol})", store, no_update, no_update, round(eff_tax, 1),
+            shares_m, net_debt_m)
 
 
-def _proj_table(n_years, symbol, base_revenue, stmt="income", year_labels=None):
-    """Build the projection input table with grouped financial statement layout."""
-    ccy = "$"
-    if year_labels is None:
-        year_labels = [f"Year {i+1}" for i in range(n_years)]
+# ── Drivers grid — rebuilt on period / seed change ───────────────────
 
-    # Select the statement rows
-    stmt_rows_map = {
-        "income":   _INCOME_STMT_ROWS,
-        "balance":  _BALANCE_SHEET_ROWS,
-        "cashflow": _CASHFLOW_STMT_ROWS,
-    }
-    groups = stmt_rows_map.get(stmt, _INCOME_STMT_ROWS)
+@app.callback(
+    Output("dcf-drivers", "children"),
+    Input("dcf-period-store", "data"),
+    Input("dcf-model-store", "data"),
+    prevent_initial_call=True,
+)
+def _build_drivers(period, model):
+    if not model:
+        return html.Div("Select a security to build a DCF model.",
+            style=dict(color=T4, fontSize="12.5px", padding="12px 0"))
 
-    def _hdr_row():
-        cells = [html.Div(style=dict(flex=f"0 0 {LABEL_W}", minWidth=LABEL_W))]
-        for y in year_labels:
-            cells.append(html.Div(y, style=dict(
-                flex="1", textAlign="right",
-                fontSize="11px", color=T4, fontWeight="600")))
-        return html.Div(cells, style=dict(
-            display="flex", gap="16px", padding="6px 0",
-            borderBottom="1px solid rgba(255,255,255,0.08)",
-            marginBottom="2px"))
+    n = _PERIODS.get(period or "5Y", 5)
+    seed = model.get("seed", {})
+    ccy = model.get("ccy", "$")
+    year_labels = _year_labels(model.get("base_year") or 2025, n)
 
-    def _group_hdr(text):
-        return html.Div(text, style=dict(
-            fontSize="10px", fontWeight="700", color=T5,
-            letterSpacing="0.7px", textTransform="uppercase",
-            padding="10px 0 3px"))
+    # Header row: label | Hist | Y1..Yn
+    hdr = [
+        html.Div(style=dict(flex=f"0 0 {LABEL_W}", minWidth=LABEL_W)),
+        html.Div("Hist.", style=dict(flex=f"0 0 {HIST_W}", minWidth=HIST_W,
+            textAlign="right", fontSize="10.5px", color=T5, fontWeight="600")),
+    ]
+    for y in year_labels:
+        hdr.append(html.Div(y, style=dict(flex="1", textAlign="right",
+            fontSize="11px", color=T4, fontWeight="600")))
+    rows = [html.Div(hdr, style=dict(display="flex", gap="12px", padding="4px 0",
+        borderBottom="1px solid rgba(255,255,255,0.08)", marginBottom="4px"))]
 
-    def _data_row(label, input_id, is_total, calculated=False):
-        cells = [html.Div(label, style=dict(
-            flex=f"0 0 {LABEL_W}", minWidth=LABEL_W, paddingLeft="8px",
-            fontSize="12.5px",
-            fontWeight="600" if is_total else "400",
-            color=T1 if is_total else T3))]
-        for i in range(n_years):
-            if calculated:
-                cells.append(html.Div(
-                    id={"type": "dcf-calc-cell", "index": f"{input_id}-{i}"},
-                    style=dict(flex="1", textAlign="right",
-                        fontSize="12.5px",
-                        fontWeight="600" if is_total else "400",
-                        color=T1 if is_total else T2,
-                        fontFamily="'JetBrains Mono',monospace",
-                        padding="6px 8px")))
-            else:
-                input_id_dict = {"type": "dcf-proj-input",
-                                 "index": f"{input_id}-{i}"}
-                cells.append(html.Div(
-                    _input_cell("", value=None, input_id=input_id_dict),
-                    style=dict(flex="1")))
-        result = [html.Div(cells, style=dict(
-            display="flex", gap="16px",
-            padding="5px 0",
-            background="rgba(255,255,255,0.015)" if is_total else "transparent"))]
+    for driver_id, label, seed_key in _DRIVERS:
+        hist_val = seed.get(seed_key)
+        cells = [
+            html.Div(label, style=dict(flex=f"0 0 {LABEL_W}", minWidth=LABEL_W,
+                fontSize="12.5px", color=T3, paddingLeft="4px")),
+            html.Div(_fmt_pct(hist_val), style=dict(flex=f"0 0 {HIST_W}",
+                minWidth=HIST_W, textAlign="right", fontSize="11.5px",
+                color=T5, fontFamily=MONO, paddingTop="6px")),
+        ]
+        for i in range(n):
+            cells.append(html.Div(
+                _num_input({"type": "dcf-driver", "index": f"{driver_id}-{i}"},
+                           value=hist_val, step=0.1),
+                style=dict(flex="1")))
+        rows.append(html.Div(cells, style=dict(display="flex", gap="12px",
+            padding="4px 0", alignItems="center")))
 
-        # Add percentage sub-row if this field has a parent
-        pct_def = _PCT_MAP.get(input_id)
-        if pct_def:
-            _, parent_id, pct_label = pct_def
-            pct_id_dict = {"type": "dcf-pct-input", "index": input_id}
-            pct_cells = [
-                html.Div([
-                    html.Span(f"% {pct_label} ", style=dict(
-                        fontSize="10px", fontStyle="italic", color=T5)),
-                    html.Span("%", style=dict(
-                        fontSize="9px", color=T4,
-                        fontFamily="'JetBrains Mono',monospace")),
-                    dcc.Input(
-                        id=pct_id_dict, type="number", placeholder="",
-                        value=None, debounce=True, step=1,
-                        style=dict(
-                            background="rgba(255,255,255,0.04)",
-                            border="1px solid rgba(255,255,255,0.08)",
-                            borderRadius="3px", color=T1,
-                            fontFamily="'JetBrains Mono',monospace",
-                            fontSize="10px", padding="2px 4px",
-                            width="42px", textAlign="right",
-                            outline="none", marginLeft="3px")),
-                ], style=dict(flex=f"0 0 {LABEL_W}", minWidth=LABEL_W,
-                    paddingLeft="20px", display="flex",
-                    alignItems="center")),
-            ]
-            # Empty cells for year columns (percentage applies to all)
-            for i in range(n_years):
-                pct_cells.append(html.Div(style=dict(flex="1")))
-            result.append(html.Div(pct_cells, style=dict(
-                display="flex", gap="16px", padding="0 0 3px")))
-        return result
-
-    rows = [_hdr_row()]
-    for grp_label, row_defs in groups:
-        rows.append(_group_hdr(grp_label))
-        for row_def in row_defs:
-            label, input_id, is_total = row_def[:3]
-            calculated = row_def[3] if len(row_def) > 3 else False
-            rows.extend(_data_row(label, input_id, is_total, calculated))
-
+    base = model.get("base_rev")
     return html.Div([
-        html.Div(f"Base Revenue: {ccy}{_fmt_plain(base_revenue)}",
-            style=dict(fontSize="11px", color=T4, marginBottom="8px")),
+        html.Div(f"Base revenue (LTM): {ccy}{_fmt_money(base, '')}",
+            style=dict(fontSize="11px", color=T4, marginBottom="10px")),
         html.Div(rows, style=dict(overflowX="auto")),
     ])
 
 
-# ── Valuation summary builder ────────────────────────────────────────
+# ── Live compute: FCFF build + valuation + sensitivity ───────────────
 
-def _valuation_summary(ev, eq, price, shares_m):
-    ccy = "$"
-    return html.Div([
+def _gather_drivers(ids, values, n):
+    """Turn pattern-matched driver inputs into {driver_id: [v0..v(n-1)]}."""
+    out = {d[0]: [None] * n for d in _DRIVERS}
+    for id_dict, v in zip(ids, values):
+        base, _, idx = id_dict["index"].rpartition("-")
+        try:
+            i = int(idx)
+        except ValueError:
+            continue
+        if base in out and 0 <= i < n:
+            out[base][i] = v
+    return out
+
+
+def _num_row(label, values, ccy, kind="normal", pct=False, dp_price=False):
+    """One right-aligned numeric row in a build table."""
+    weight = "600" if kind in ("total", "accent") else "400"
+    color = {"total": T1, "accent": ACCENT, "muted": T5}.get(kind, T2)
+    label_color = T1 if kind in ("total", "accent") else (T5 if kind == "muted" else T3)
+    cells = [html.Div(label, style=dict(flex=f"0 0 {LABEL_W}", minWidth=LABEL_W,
+        fontSize="12px" if kind != "muted" else "11px",
+        fontWeight=weight, color=label_color, paddingLeft="4px"))]
+    for v in values:
+        if pct:
+            txt = _fmt_pct(v)
+        elif dp_price:
+            txt = f"{v:.3f}" if isinstance(v, (int, float)) else "—"
+        else:
+            txt = _fmt_money(v, ccy)
+        cells.append(html.Div(txt, style=dict(flex="1", textAlign="right",
+            fontSize="12px" if kind != "muted" else "11px",
+            fontWeight=weight, color=color, fontFamily=MONO)))
+    return html.Div(cells, style=dict(display="flex", gap="12px", padding="4px 0",
+        background="rgba(255,255,255,0.02)" if kind in ("total", "accent") else "transparent"))
+
+
+@app.callback(
+    Output("dcf-projection-table", "children"),
+    Output("dcf-valuation", "children"),
+    Output("dcf-sensitivity", "children"),
+    Output("dcf-header-verdict", "children"),
+    Input({"type": "dcf-driver", "index": ALL}, "value"),
+    Input("dcf-wacc", "value"),
+    Input("dcf-tgr", "value"),
+    Input("dcf-tax", "value"),
+    Input("dcf-shares", "value"),
+    Input("dcf-net-debt", "value"),
+    Input("dcf-period-store", "data"),
+    State({"type": "dcf-driver", "index": ALL}, "id"),
+    State("dcf-model-store", "data"),
+    prevent_initial_call=True,
+)
+def _compute(driver_vals, wacc, tgr, tax, shares_m, net_debt_m,
+             period, driver_ids, model):
+    if not model or not driver_ids:
+        return no_update, no_update, no_update, no_update
+
+    n = _PERIODS.get(period or "5Y", 5)
+    # Driver grid may briefly hold the previous period's count during rebuild.
+    if len(driver_ids) != len(_DRIVERS) * n:
+        return no_update, no_update, no_update, no_update
+
+    base_rev = _safe(model.get("base_rev"), 1e9)
+    ccy = model.get("ccy", "$")
+    price = _safe(model.get("price"), 0)
+    year_labels = _year_labels(model.get("base_year") or 2025, n)
+
+    wacc = (wacc if wacc is not None else 9.0) / 100.0
+    tgr = (tgr if tgr is not None else 2.5) / 100.0
+    tax = (tax if tax is not None else 25.0) / 100.0
+    shares_m = shares_m if shares_m else 1000
+    net_debt_m = net_debt_m if net_debt_m is not None else 0
+
+    drivers = _gather_drivers(driver_ids, driver_vals, n)
+    val = _value(base_rev, drivers, wacc, tgr, tax, shares_m, net_debt_m, n)
+    rows = val["rows"]
+
+    # ── FCFF build table ──
+    hdr_cells = [html.Div(style=dict(flex=f"0 0 {LABEL_W}", minWidth=LABEL_W))]
+    for lbl in year_labels:
+        hdr_cells.append(html.Div(lbl, style=dict(flex="1", textAlign="right",
+            fontSize="11px", color=T4, fontWeight="600")))
+    build = html.Div([
+        html.Div(hdr_cells, style=dict(display="flex", gap="12px", padding="4px 0",
+            borderBottom="1px solid rgba(255,255,255,0.08)", marginBottom="4px")),
+        _num_row("Revenue",        [r["revenue"] for r in rows], ccy, "total"),
+        _num_row("  growth %",     [r["growth"] for r in rows], ccy, "muted", pct=True),
+        _num_row("EBIT",           [r["ebit"] for r in rows], ccy),
+        _num_row("  margin %",     [r["margin"] for r in rows], ccy, "muted", pct=True),
+        _num_row("Less: taxes",    [-r["taxes"] for r in rows], ccy),
+        _num_row("NOPAT",          [r["nopat"] for r in rows], ccy, "total"),
+        _num_row("Plus: D&A",      [r["da"] for r in rows], ccy),
+        _num_row("Less: CapEx",    [-r["capex"] for r in rows], ccy),
+        _num_row("Less: ΔNWC",     [-r["dnwc"] for r in rows], ccy),
+        _num_row("Unlevered FCFF", [r["fcff"] for r in rows], ccy, "accent"),
+        _num_row("Discount factor",[r["df"] for r in rows], ccy, "muted", dp_price=True),
+        _num_row("PV of FCFF",     [r["pv"] for r in rows], ccy, "total"),
+    ], style=dict(overflowX="auto"))
+
+    # ── Valuation bridge ──
+    upside = (val["per_share"] / price - 1) * 100 if price else None
+    up_color = ACCENT if (upside or 0) >= 0 else RED
+    tv_warn = val["tv_share"] > 0.75
+    bridge = html.Div([
         html.Div([
-            html.Div([
-                html.Div("Enterprise Value", style=dict(
-                    fontSize="10.5px", color=T4, fontWeight="500",
-                    letterSpacing="0.3px")),
-                html.Div(f"{ccy}{_fmt_money(ev, '')}", style=dict(
-                    fontSize="18px", fontWeight="600", color=T1,
-                    fontFamily="'JetBrains Mono',monospace", marginTop="4px")),
-            ], style=dict(flex="1")),
-            html.Div([
-                html.Div("Equity Value", style=dict(
-                    fontSize="10.5px", color=T4, fontWeight="500",
-                    letterSpacing="0.3px")),
-                html.Div(f"{ccy}{_fmt_money(eq, '')}", style=dict(
-                    fontSize="18px", fontWeight="600", color=T1,
-                    fontFamily="'JetBrains Mono',monospace", marginTop="4px")),
-            ], style=dict(flex="1")),
-            html.Div([
-                html.Div("Implied Share Price", style=dict(
-                    fontSize="10.5px", color=T4, fontWeight="500",
-                    letterSpacing="0.3px")),
-                html.Div(f"{ccy}{price:.2f}", style=dict(
-                    fontSize="18px", fontWeight="600", color=ACCENT,
-                    fontFamily="'JetBrains Mono',monospace", marginTop="4px")),
-            ], style=dict(flex="1")),
-            html.Div([
-                html.Div("Shares Outstanding", style=dict(
-                    fontSize="10.5px", color=T4, fontWeight="500",
-                    letterSpacing="0.3px")),
-                html.Div(f"{shares_m:,.0f}M", style=dict(
-                    fontSize="18px", fontWeight="600", color=T1,
-                    fontFamily="'JetBrains Mono',monospace", marginTop="4px")),
-            ], style=dict(flex="1")),
-        ], style=dict(display="flex", gap="20px")),
+            _stat_tile("Σ PV of FCFF",   f"{ccy}{_fmt_money(val['sum_pv'], '')}"),
+            _stat_tile("PV of Terminal", f"{ccy}{_fmt_money(val['pv_tv'], '')}",
+                       sub=f"{val['tv_share']*100:.0f}% of EV"),
+            _stat_tile("Enterprise Value", f"{ccy}{_fmt_money(val['ev'], '')}", T1),
+        ], style=dict(display="flex", gap="18px", marginBottom="16px")),
+        html.Div([
+            _stat_tile("Less: Net Debt", f"{ccy}{_fmt_money(net_debt_m*1e6, '')}"),
+            _stat_tile("Equity Value",   f"{ccy}{_fmt_money(val['equity'], '')}", T1),
+            _stat_tile("Implied / Share", _fmt_price(val["per_share"], ccy), ACCENT),
+        ], style=dict(display="flex", gap="18px")),
+        html.Div(
+            f"⚠ Terminal value is {val['tv_share']*100:.0f}% of enterprise value — "
+            "result is highly sensitive to terminal assumptions."
+            if tv_warn else "",
+            style=dict(fontSize="10.5px", color="#f6c453", marginTop="14px")),
+    ])
+
+    # ── Header verdict badge ──
+    if price:
+        verdict = [
+            _stat_tile("Current", _fmt_price(price, ccy), T2),
+            _stat_tile("Implied", _fmt_price(val["per_share"], ccy), ACCENT),
+            _stat_tile("Upside", _fmt_pct(upside, signed=True), up_color),
+        ]
+    else:
+        verdict = [_stat_tile("Implied", _fmt_price(val["per_share"], ccy), ACCENT)]
+
+    # ── Sensitivity grid ──
+    sens = _sensitivity(base_rev, drivers, wacc, tgr, tax, shares_m,
+                        net_debt_m, n, price, ccy)
+
+    return build, bridge, sens, verdict
+
+
+# ── Sensitivity grid: implied price over WACC × terminal growth ──────
+
+def _heat(t):
+    """Red → amber → green background for a normalised value ``t`` in [0, 1]."""
+    stops = [(255, 107, 107), (245, 196, 83), (54, 211, 153)]  # low → mid → high
+    if t <= 0.5:
+        (r0, g0, b0), (r1, g1, b1), f = stops[0], stops[1], t / 0.5
+    else:
+        (r0, g0, b0), (r1, g1, b1), f = stops[1], stops[2], (t - 0.5) / 0.5
+    r = int(r0 + (r1 - r0) * f)
+    g = int(g0 + (g1 - g0) * f)
+    b = int(b0 + (b1 - b0) * f)
+    return f"rgba({r},{g},{b},0.22)"
+
+
+def _sensitivity(base_rev, drivers, wacc, tgr, tax, shares_m, net_debt_m,
+                 n, price, ccy):
+    wacc_steps = [wacc + d for d in (-0.010, -0.005, 0.0, 0.005, 0.010)]
+    tgr_steps = [tgr + d for d in (-0.010, -0.005, 0.0, 0.005, 0.010)]
+
+    # Precompute the whole grid so the colour gradient can span its own range.
+    matrix = [[(_implied_price(base_rev, drivers, w, g, tax, shares_m,
+                               net_debt_m, n) if w > g else float("nan"))
+               for g in tgr_steps] for w in wacc_steps]
+    finite = [v for row in matrix for v in row if v == v]
+    vmin, vmax = (min(finite), max(finite)) if finite else (0.0, 1.0)
+    span = (vmax - vmin) or 1.0
+
+    def cell_bg(imp):
+        if imp != imp:                       # NaN → uncoloured
+            return "transparent"
+        return _heat((imp - vmin) / span)    # low = red, high = green
+
+    # Corner + terminal-growth column headers.
+    hdr = [html.Div("WACC \\ g", style=dict(flex=f"0 0 {HIST_W}", minWidth=HIST_W,
+        fontSize="10px", color=T5, fontWeight="600", paddingLeft="4px"))]
+    for g in tgr_steps:
+        hdr.append(html.Div(f"{g*100:.1f}%", style=dict(flex="1", textAlign="center",
+            fontSize="11px", color=T4, fontWeight="600")))
+    grid = [html.Div(hdr, style=dict(display="flex", gap="6px", padding="4px 0",
+        borderBottom="1px solid rgba(255,255,255,0.08)", marginBottom="4px"))]
+
+    for wi, w in enumerate(wacc_steps):
+        cells = [html.Div(f"{w*100:.1f}%", style=dict(flex=f"0 0 {HIST_W}",
+            minWidth=HIST_W, fontSize="11px", color=T4, fontWeight="600",
+            paddingLeft="4px", display="flex", alignItems="center"))]
+        for gi, g in enumerate(tgr_steps):
+            imp = matrix[wi][gi]
+            is_base = abs(w - wacc) < 1e-9 and abs(g - tgr) < 1e-9
+            cells.append(html.Div(_fmt_price(imp, ccy), style=dict(
+                flex="1", textAlign="center", fontSize="11.5px",
+                fontFamily=MONO, padding="7px 4px", borderRadius="4px",
+                color=T1, fontWeight="700" if is_base else "400",
+                border=f"1px solid {ACCENT}" if is_base else "1px solid transparent",
+                background=cell_bg(imp))))
+        grid.append(html.Div(cells, style=dict(display="flex", gap="6px",
+            padding="2px 0")))
+
+    note = "Rows = WACC · Columns = terminal growth · centre = base case"
+    if price:
+        note += "  ·  green = higher implied value, red = lower"
+    return html.Div([
+        html.Div(note, style=dict(fontSize="10.5px", color=T5, marginBottom="10px")),
+        html.Div(grid, style=dict(overflowX="auto")),
     ])
 
 
-# ── Period toggle callback ───────────────────────────────────────────
+# ── Period toggle ────────────────────────────────────────────────────
 
 @app.callback(
     Output("dcf-period-store", "data"),
@@ -585,394 +706,19 @@ def _set_dcf_period(_clicks):
 )
 def _dcf_period_btn_classes(active):
     b = "sec-range-btn"
-    return [f"{b} active" if i["index"] == active else b
-            for i in [{"index": "3Y"}, {"index": "5Y"}, {"index": "10Y"}]]
+    return [f"{b} active" if p == active else b for p in _PERIODS]
 
 
-# ── Statement toggle callback ────────────────────────────────────────
-
-@app.callback(
-    Output("dcf-stmt-store", "data"),
-    Input("dcf-stmt-income",   "n_clicks"),
-    Input("dcf-stmt-balance",  "n_clicks"),
-    Input("dcf-stmt-cashflow", "n_clicks"),
-    prevent_initial_call=True,
-)
-def _set_dcf_stmt(*_):
-    from dash import ctx
-    tid = ctx.triggered_id
-    return {"dcf-stmt-income": "income",
-            "dcf-stmt-balance": "balance",
-            "dcf-stmt-cashflow": "cashflow"}.get(tid, no_update)
-
-
-@app.callback(
-    Output("dcf-stmt-income",   "className"),
-    Output("dcf-stmt-balance",  "className"),
-    Output("dcf-stmt-cashflow", "className"),
-    Input("dcf-stmt-store", "data"),
-)
-def _dcf_stmt_btn_classes(stmt):
-    b = "sec-range-btn"
-    return (
-        f"{b} active" if stmt == "income"   else b,
-        f"{b} active" if stmt == "balance"  else b,
-        f"{b} active" if stmt == "cashflow" else b,
-    )
-
-
-# ── Projection table callback ────────────────────────────────────────
-
-@app.callback(
-    Output("dcf-projection-table", "children"),
-    Input("dcf-period-store", "data"),
-    Input("dcf-ticker-store", "data"),
-    Input("dcf-stmt-store", "data"),
-    prevent_initial_call=True,
-)
-def _build_projection_table(period, symbol, stmt):
-    if not symbol:
-        return html.Div("Select a security to build a DCF model.",
-            style=dict(color=T4, fontSize="12.5px", padding="16px 0"))
-
-    n_years = {"3Y": 3, "5Y": 5, "10Y": 10}.get(period or "5Y", 5)
-
-    yf = _fetch_yf_info(symbol)
-    info = yf.get("info", {})
-    income = yf.get("income")
-    base_rev = _df_val(income, "Total Revenue", "Operating Revenue") or 1e9
-    labels = _year_labels(income, n_years)
-
-    return _proj_table(n_years, symbol, base_rev, stmt=stmt or "income",
-                       year_labels=labels)
-
-
-# ── DCF calculation callback ─────────────────────────────────────────
-
-@app.callback(
-    Output("dcf-valuation-card", "style"),
-    Output("dcf-valuation", "children"),
-    Input("dcf-perform-btn", "n_clicks"),
-    State("dcf-period-store", "data"),
-    State("dcf-ticker-store", "data"),
-    State("dcf-wacc", "value"),
-    State("dcf-tgr", "value"),
-    State("dcf-tax", "value"),
-    State("dcf-shares", "value"),
-    State("dcf-net-debt", "value"),
-    State({"type": "dcf-proj-input", "index": ALL}, "id"),
-    State({"type": "dcf-proj-input", "index": ALL}, "value"),
-    prevent_initial_call=True,
-)
-def _perform_dcf(n, period, symbol, wacc, tgr, tax_rate,
-                 shares_m, net_debt, input_ids, input_values):
-    if not symbol or not n:
-        return no_update, no_update
-
-    wacc = (wacc or 10) / 100.0
-    tgr = (tgr or 2.5) / 100.0
-    tax_rate = (tax_rate or 25) / 100.0
-    shares_m = shares_m or 1000
-    net_debt = net_debt or 0
-
-    n_years = {"3Y": 3, "5Y": 5, "10Y": 10}.get(period or "5Y", 5)
-
-    # Fetch base revenue
-    yf = _fetch_yf_info(symbol)
-    income = yf.get("income")
-    base_rev = _df_val(income, "Total Revenue", "Operating Revenue") or 1e9
-
-    # Parse input values into a dict keyed by suffix
-    vals = {}
-    for inp_id, v in zip(input_ids, input_values):
-        suffix = inp_id["index"]  # e.g. "rev-growth-0"
-        vals[suffix] = v
-
-    # Default assumptions (% of revenue for income-statement items)
-    defaults = {
-        "cogs": 60, "opex": 20, "da": 5, "capex": 6,
-        "rnd": 10, "sga": 10, "int-expense": 2, "tax": 25,
-        "cf-da": 5, "cf-nwc": 2, "sbc": 2,
-        "purchase-ppe": 6, "dividends": 2,
-    }
-
-    def _get(suffix, year_idx):
-        key = f"{suffix}-{year_idx}"
-        v = vals.get(key)
-        if v is not None:
-            return float(v) / 100.0
-        return defaults.get(suffix, 0) / 100.0
-
-    # Build projections year by year
-    projections = []
-    rev = base_rev
-    for i in range(n_years):
-        cogs = rev * _get("cogs", i)
-        opex = rev * _get("opex", i)
-        da = rev * _get("da", i)
-        capex = rev * _get("capex", i)
-        nwc = rev * _get("cf-nwc", i)
-
-        gross_profit = rev - cogs
-        ebitda = gross_profit - opex
-        ebit = ebitda - da
-        nopat = ebit * (1 - tax_rate)
-        fcf = nopat + da - capex - nwc
-
-        projections.append({
-            "revenue": rev, "gross_profit": gross_profit,
-            "ebitda": ebitda, "ebit": ebit,
-            "nopat": nopat, "fcf": fcf,
-        })
-
-    # Terminal value (Gordon Growth Model)
-    if projections:
-        terminal_fcf = projections[-1]["fcf"] * (1 + tgr)
-        terminal_value = terminal_fcf / (wacc - tgr) if wacc > tgr else 0
-    else:
-        terminal_value = 0
-
-    # Discount projected FCFs and terminal value
-    pv_fcfs = sum(
-        p["fcf"] / (1 + wacc) ** (i + 1)
-        for i, p in enumerate(projections)
-    )
-    pv_terminal = terminal_value / (1 + wacc) ** n_years if projections else 0
-
-    ev = pv_fcfs + pv_terminal
-    eq = ev - net_debt
-    price_per_share = eq / shares_m if shares_m else 0
-
-    # Build valuation summary
-    summary = _valuation_summary(ev, eq, price_per_share, shares_m)
-
-    card_style = dict(
-        background=BG_CARD, border=f"1px solid {BORDER}",
-        borderRadius="14px", padding="20px", display="block")
-
-    return card_style, summary
-
-
-# ── Back button callback ─────────────────────────────────────────────
+# ── Back button ──────────────────────────────────────────────────────
 
 @app.callback(
     Output("sec-detail-store", "data", allow_duplicate=True),
+    Output("dcf-ticker-store", "data", allow_duplicate=True),
     Input("dcf-back-btn", "n_clicks"),
     State("dcf-ticker-store", "data"),
     prevent_initial_call=True,
 )
 def _dcf_back(_n, symbol):
-    return symbol
-
-
-# ── Ticker name display ─────────────────────────────────────────────
-
-@app.callback(
-    Output("dcf-ticker-name", "children"),
-    Input("dcf-ticker-store", "data"),
-    prevent_initial_call=True,
-)
-def _update_dcf_ticker_name(symbol):
-    if not symbol:
-        return ""
-    yf = _fetch_yf_info(symbol)
-    info = yf.get("info", {})
-    name = info.get("name", symbol)
-    return f"{name} ({symbol})"
-
-
-# ── Client-side auto-calc: % of parent → child value ────────────────
-
-# Outputs: one per child per year (e.g. cogs-0, cogs-1, ..., rnd-0, rnd-1, ...)
-_PCSOutputs = [Output({"type": "dcf-proj-input", "index": c}, "value")
-               for c in _PCT_CHILD_IDSFull]
-# Inputs: single percentage per row (e.g. cogs-pct, rnd-pct, ...)
-_PCSInputs  = [Input({"type": "dcf-pct-input", "index": c}, "value")
-               for c in _PCT_CHILD_IDS]
-# States: parent values per year (e.g. total-revenue-0, total-revenue-1, ...)
-_PCSStates  = [State({"type": "dcf-proj-input", "index": p}, "value")
-               for p in _PCT_PARENT_IDSFull]
-
-app.clientside_callback(
-    """
-    function(...args) {
-        const n_pct = %(n_pct)s;
-        const n_years = %(n_years)s;
-        const childBases = %(child_bases)s;
-        const parentBases = %(parent_bases)s;
-        const mapping = %(mapping)s;
-
-        // First n_pct args are single percentage values per row
-        var pctMap = {};
-        for (var j = 0; j < n_pct; j++) {
-            if (args[j] !== null && args[j] !== undefined && args[j] !== "")
-                pctMap[childBases[j]] = parseFloat(args[j]);
-        }
-
-        // Remaining args are parent values per year: parent0-yr0, parent0-yr1, ...
-        var parMap = {};
-        var stateArgs = args.slice(n_pct);
-        for (var j = 0; j < parentBases.length; j++) {
-            for (var y = 0; y < n_years; y++) {
-                var key = parentBases[j] + "-" + y;
-                var idx = j * n_years + y;
-                if (idx < stateArgs.length && stateArgs[idx] !== null && stateArgs[idx] !== undefined && stateArgs[idx] !== "")
-                    parMap[key] = parseFloat(stateArgs[idx]);
-            }
-        }
-
-        // For each child per year, calculate value = parent * pct / 100
-        var results = [];
-        for (var c = 0; c < childBases.length; c++) {
-            var baseId = childBases[c];
-            var pct = pctMap[baseId];
-            var parentId = mapping[baseId] || null;
-            for (var y = 0; y < n_years; y++) {
-                if (pct === undefined || pct === null || !parentId) {
-                    results.push(null);
-                    continue;
-                }
-                var parKey = parentId + "-" + y;
-                if (parMap[parKey] !== undefined) {
-                    results.push(Math.round(parMap[parKey] * pct / 100));
-                } else {
-                    results.push(null);
-                }
-            }
-        }
-        return results;
-    }
-    """ % {
-        "n_pct": len(_PCT_CHILD_IDS),
-        "n_years": 10,
-        "child_bases": str(_PCT_CHILD_IDS),
-        "parent_bases": str(_PCT_PARENT_IDS),
-        "mapping": str({child: parent for child, parent, _ in _PCT_FIELDS}),
-    },
-    _PCSOutputs,
-    _PCSInputs + _PCSStates,
-)
-
-
-# ── Client-side auto-calc: computed fields (totals, subtotals) ──────
-
-_CCSInputs = [Input({"type": "dcf-proj-input", "index": c}, "value")
-              for c in _CALC_INPUT_IDS_FULL]
-_CCSOutputs = [Output({"type": "dcf-calc-cell", "index": c}, "children")
-               for c in _CALC_CHILD_IDS]
-
-app.clientside_callback(
-    """
-    function(...args) {
-        const n_in = %(n_in)s;
-        const inIds  = %(in_ids)s;
-        const calcIds = %(calc_ids)s;
-        const mapping = %(mapping)s;
-
-        // Build input lookup
-        var vals = {};
-        for (var j = 0; j < inIds.length; j++) {
-            if (args[j] !== null && args[j] !== undefined && args[j] !== "")
-                vals[inIds[j]] = parseFloat(args[j]);
-        }
-
-        function v(key) { return vals[key] || 0; }
-
-        var results = [];
-        for (var i = 0; i < calcIds.length; i++) {
-            var cid = calcIds[i];
-            // Extract year suffix (e.g. "gross-profit-0" → "0")
-            var dashIdx = cid.lastIndexOf("-");
-            var year = cid.substring(dashIdx + 1);
-            var base = cid.substring(0, dashIdx);
-            var val = 0;
-
-            // ── Income Statement ──
-            if (base === "gross-profit")
-                val = v("total-revenue-"+year) - v("cogs-"+year);
-            else if (base === "opex")
-                val = v("rnd-"+year) + v("sga-"+year);
-            else if (base === "op-income")
-                val = (v("total-revenue-"+year) - v("cogs-"+year)) - (v("rnd-"+year) + v("sga-"+year));
-            else if (base === "ebitda")
-                val = ((v("total-revenue-"+year) - v("cogs-"+year)) - (v("rnd-"+year) + v("sga-"+year))) + v("da-"+year);
-            else if (base === "ebit")
-                val = ((v("total-revenue-"+year) - v("cogs-"+year)) - (v("rnd-"+year) + v("sga-"+year))) - v("da-"+year);
-            else if (base === "pretax")
-                val = (((v("total-revenue-"+year) - v("cogs-"+year)) - (v("rnd-"+year) + v("sga-"+year))) - v("da-"+year)) + v("int-income-"+year) - v("int-expense-"+year);
-            else if (base === "net-income")
-                val = ((((v("total-revenue-"+year) - v("cogs-"+year)) - (v("rnd-"+year) + v("sga-"+year))) - v("da-"+year)) + v("int-income-"+year) - v("int-expense-"+year)) * (1 - v("tax-"+year) / 100);
-
-            // ── Balance Sheet ──
-            else if (base === "total-ca")
-                val = v("cash-"+year) + v("receivables-"+year) + v("inventory-"+year) + v("other-ca-"+year);
-            else if (base === "total-nca")
-                val = v("ppe-"+year) + v("investments-"+year) + v("other-nca-"+year);
-            else if (base === "total-assets")
-                val = (v("cash-"+year) + v("receivables-"+year) + v("inventory-"+year) + v("other-ca-"+year))
-                    + (v("ppe-"+year) + v("investments-"+year) + v("other-nca-"+year));
-            else if (base === "total-cl")
-                val = v("payables-"+year) + v("current-debt-"+year) + v("other-cl-"+year);
-            else if (base === "total-ncl")
-                val = v("lt-debt-"+year) + v("other-ncl-"+year);
-            else if (base === "total-liab")
-                val = (v("payables-"+year) + v("current-debt-"+year) + v("other-cl-"+year))
-                    + (v("lt-debt-"+year) + v("other-ncl-"+year));
-            else if (base === "equity")
-                val = ((v("cash-"+year) + v("receivables-"+year) + v("inventory-"+year) + v("other-ca-"+year))
-                    + (v("ppe-"+year) + v("investments-"+year) + v("other-nca-"+year)))
-                    - ((v("payables-"+year) + v("current-debt-"+year) + v("other-cl-"+year))
-                    + (v("lt-debt-"+year) + v("other-ncl-"+year)));
-            else if (base === "working-capital")
-                val = (v("cash-"+year) + v("receivables-"+year) + v("inventory-"+year) + v("other-ca-"+year))
-                    - (v("payables-"+year) + v("current-debt-"+year) + v("other-cl-"+year));
-            else if (base === "net-debt")
-                val = (v("current-debt-"+year) + v("lt-debt-"+year)) - v("cash-"+year);
-            else if (base === "invested-capital")
-                val = ((v("cash-"+year) + v("receivables-"+year) + v("inventory-"+year) + v("other-ca-"+year))
-                    + (v("ppe-"+year) + v("investments-"+year) + v("other-nca-"+year)))
-                    - (v("payables-"+year) + v("other-cl-"+year));
-
-            // ── Cash Flow ──
-            else if (base === "ocf")
-                val = v("cf-net-income-"+year) + v("cf-da-"+year) + v("sbc-"+year) + v("cf-nwc-"+year) + v("cf-other-"+year);
-            else if (base === "icf")
-                val = v("capex-"+year) + v("purchase-ppe-"+year) + v("purchase-inv-"+year) + v("sale-inv-"+year);
-            else if (base === "fcf-total")
-                val = v("dividends-"+year) + v("buybacks-"+year) + v("debt-issuance-"+year) + v("debt-repayment-"+year) + v("net-debt-issuance-"+year);
-            else if (base === "fcf")
-                val = (v("cf-net-income-"+year) + v("cf-da-"+year) + v("sbc-"+year) + v("cf-nwc-"+year) + v("cf-other-"+year))
-                    + (v("capex-"+year) + v("purchase-ppe-"+year) + v("purchase-inv-"+year) + v("sale-inv-"+year));
-            else if (base === "end-cash")
-                val = v("cash-"+year) + (v("cf-net-income-"+year) + v("cf-da-"+year) + v("sbc-"+year) + v("cf-nwc-"+year) + v("cf-other-"+year))
-                    + (v("capex-"+year) + v("purchase-ppe-"+year) + v("purchase-inv-"+year) + v("sale-inv-"+year))
-                    + (v("dividends-"+year) + v("buybacks-"+year) + v("debt-issuance-"+year) + v("debt-repayment-"+year) + v("net-debt-issuance-"+year));
-            else if (base === "net-cash-change")
-                val = (v("cf-net-income-"+year) + v("cf-da-"+year) + v("sbc-"+year) + v("cf-nwc-"+year) + v("cf-other-"+year))
-                    + (v("capex-"+year) + v("purchase-ppe-"+year) + v("purchase-inv-"+year) + v("sale-inv-"+year))
-                    + (v("dividends-"+year) + v("buybacks-"+year) + v("debt-issuance-"+year) + v("debt-repayment-"+year) + v("net-debt-issuance-"+year));
-
-            // Format: abbreviate large numbers
-            var abs = Math.abs(val);
-            var sign = val < 0 ? "-" : "";
-            var formatted;
-            if (abs >= 1e12)      formatted = sign + "$" + (abs/1e12).toFixed(2) + "T";
-            else if (abs >= 1e9)  formatted = sign + "$" + (abs/1e9).toFixed(2) + "B";
-            else if (abs >= 1e6)  formatted = sign + "$" + (abs/1e6).toFixed(1) + "M";
-            else if (abs >= 1e3)  formatted = sign + "$" + (abs/1e3).toFixed(1) + "K";
-            else if (abs === 0 && val === 0) formatted = "—";
-            else                  formatted = sign + "$" + abs.toFixed(2);
-
-            results.push(val === 0 ? "—" : formatted);
-        }
-        return results;
-    }
-    """ % {
-        "n_in": len(_CALC_INPUT_IDS_FULL),
-        "in_ids": str(_CALC_INPUT_IDS_FULL),
-        "calc_ids": str(_CALC_CHILD_IDS),
-        "mapping": "{}",
-    },
-    _CCSOutputs,
-    _CCSInputs,
-)
+    # Return to the security view and clear the DCF ticker, so re-opening the
+    # DCF page for the same symbol registers as a change and re-navigates.
+    return symbol, None
