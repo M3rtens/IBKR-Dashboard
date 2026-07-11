@@ -60,12 +60,27 @@ def _load_detail(symbol: str):
 
 # ── Layout ────────────────────────────────────────────────────────────
 
+def _filter_dropdown(cid: str, noun: str):
+    """A disclosure (click-to-open) menu of checkboxes.
+
+    Renders as a compact button showing the current selection; clicking it
+    opens a checklist you tick / untick in place, rather than editing chips in
+    the input. Styled by the ``.filter-dd`` rules in assets/style.css.
+    """
+    return html.Details([
+        html.Summary(html.Span(f"All {noun}", id=f"{cid}-summary")),
+        html.Div(dcc.Checklist(id=cid, options=[], value=[]),
+                 className="filter-dd-panel"),
+    ], className="filter-dd")
+
+
 def security_page():
     sec_range_store = dcc.Store(id="sec-range-store", data="1Y")
     sec_kalman_store = dcc.Store(id="sec-kalman-store", data=False)
     fin_stmt_store  = dcc.Store(id="fin-stmt-store",  data="income")
     fin_period_store = dcc.Store(id="fin-period-store", data="annual")
     dcf_ticker_store = dcc.Store(id="dcf-ticker-store")
+    sec_filings_store = dcc.Store(id="sec-filings-store")
 
     def _toggle_group(*buttons):
         return html.Div(buttons, style=dict(
@@ -79,6 +94,7 @@ def security_page():
         fin_stmt_store,
         fin_period_store,
         dcf_ticker_store,
+        sec_filings_store,
         # ── Header ──
         html.Div([
             html.Div([
@@ -174,6 +190,47 @@ def security_page():
             # Statement table (filled by update_fin_table)
             html.Div(id="sec-fin-table", style=dict(marginTop="6px")),
         ], id="sec-financials-card", style=dict(
+            background=BG_CARD, border=f"1px solid {BORDER}",
+            borderRadius="14px", padding="20px", display="none")),
+        # ── Analyst Ratings card (hidden until a security is loaded) ──
+        html.Div(id="sec-analyst-card", style=dict(
+            background=BG_CARD, border=f"1px solid {BORDER}",
+            borderRadius="14px", padding="20px", display="none")),
+        # ── Institutional Holders card (hidden until a security is loaded) ──
+        html.Div(id="sec-institutional-card", style=dict(
+            background=BG_CARD, border=f"1px solid {BORDER}",
+            borderRadius="14px", padding="20px", display="none")),
+        # ── Earnings Estimates card (hidden until a security is loaded) ──
+        html.Div(id="sec-earnings-card", style=dict(
+            background=BG_CARD, border=f"1px solid {BORDER}",
+            borderRadius="14px", padding="20px", display="none")),
+        # ── Earnings History card (hidden until a security is loaded) ──
+        html.Div(id="sec-earnings-history-card", style=dict(
+            background=BG_CARD, border=f"1px solid {BORDER}",
+            borderRadius="14px", padding="20px", display="none")),
+        # ── Insider Activity card (hidden until a security is loaded) ──
+        html.Div(id="sec-insider-card", style=dict(
+            background=BG_CARD, border=f"1px solid {BORDER}",
+            borderRadius="14px", padding="20px", display="none")),
+        # ── Analyst Revisions card (hidden until a security is loaded) ──
+        html.Div(id="sec-revisions-card", style=dict(
+            background=BG_CARD, border=f"1px solid {BORDER}",
+            borderRadius="14px", padding="20px", display="none")),
+        # ── Filings & Announcements card (SEC filings for US names, ASX
+        #    announcements for .AX; hidden until a security is loaded) ──
+        html.Div([
+            html.Div([
+                html.Div("Filings & Announcements", id="sec-filings-title",
+                    style=dict(fontSize="13px", fontWeight="600", color=T2)),
+                html.Div([
+                    _filter_dropdown("sec-filings-year", "years"),
+                    _filter_dropdown("sec-filings-type", "types"),
+                ], style=dict(display="flex", gap="10px", alignItems="center",
+                              justifyContent="flex-end")),
+            ], style=dict(display="flex", justifyContent="space-between",
+                          alignItems="center", gap="16px", marginBottom="16px")),
+            html.Div(id="sec-filings-table"),
+        ], id="sec-sec-filings-card", style=dict(
             background=BG_CARD, border=f"1px solid {BORDER}",
             borderRadius="14px", padding="20px", display="none")),
         # ── Loading overlay (shown while a security's data is fetched) ──
@@ -620,6 +677,1096 @@ def _build_financials_metrics(info: dict) -> html.Div:
     ])
 
 
+# ── Shared section primitives ─────────────────────────────────────────
+# Every section below the financial statements renders as a card: a title,
+# then one or more sub-blocks (a labelled group of tiles, or a table). These
+# helpers keep spacing, colour and typography identical across all of them.
+
+_TILE_BG     = "rgba(255,255,255,0.03)"
+_TILE_BORDER = "1px solid rgba(255,255,255,0.06)"
+_ROW_BORDER  = "1px solid rgba(255,255,255,0.03)"
+_HDR_BORDER  = "1px solid rgba(255,255,255,0.08)"
+_MONO        = "'JetBrains Mono',monospace"
+
+
+def _card_title(title, meta=None):
+    """Card heading, matching the 'Financials' / 'Price Chart' card titles."""
+    left = html.Div(title, style=dict(fontSize="13px", fontWeight="600", color=T2))
+    if meta is None:
+        return left
+    return html.Div([left, html.Div(meta, style=dict(fontSize="12px", color=T4))],
+        style=dict(display="flex", justifyContent="space-between",
+                   alignItems="baseline"))
+
+
+def _card(title, blocks, meta=None):
+    """Wrap a card title and its sub-blocks with consistent vertical spacing."""
+    return html.Div([_card_title(title, meta), *blocks],
+        style=dict(display="flex", flexDirection="column", gap="18px"))
+
+
+def _sub_block(label, body):
+    """A labelled sub-section (section label + body) inside a card."""
+    return html.Div([_section_label(label), body])
+
+
+def _stat_tile(label, value, color=None, sub=None):
+    """Single metric tile: label, a mono value, and an optional sub-line."""
+    children = [
+        html.Div(label, style=dict(
+            fontSize="10.5px", color=T4, fontWeight="500", letterSpacing="0.3px")),
+        html.Div(value, style=dict(
+            fontSize="15px", fontWeight="600", color=color or T1, marginTop="5px",
+            fontFamily=_MONO)),
+    ]
+    if sub:
+        children.append(html.Div(sub, style=dict(
+            fontSize="10px", color=T5, marginTop="3px")))
+    return html.Div(children, style=dict(
+        padding="12px 14px", background=_TILE_BG,
+        borderRadius="10px", border=_TILE_BORDER))
+
+
+def _tile_grid(tiles, min_w="120px"):
+    return html.Div(tiles, style=dict(
+        display="grid",
+        gridTemplateColumns=f"repeat(auto-fit, minmax({min_w}, 1fr))",
+        gap="10px"))
+
+
+def _table(columns, rows, max_height=None):
+    """Compact list table shared by every holder / estimate / history block.
+
+    ``columns`` is a list of ``(label, flex, align)`` tuples; ``rows`` is a list
+    of rows, each a list of cells aligned to ``columns``. A cell may be a plain
+    string, a ``(text, colour)`` tuple, or a Dash component (e.g. a link).
+    """
+    header = html.Div([
+        html.Div(lbl, style=dict(flex=flex, fontSize="10.5px", fontWeight="600",
+            color=T4, textAlign=align, letterSpacing="0.5px"))
+        for lbl, flex, align in columns
+    ], style=dict(display="flex", gap="12px", padding="6px 0 10px",
+                  borderBottom=_HDR_BORDER))
+
+    row_els = []
+    for r in rows:
+        cells = []
+        for (lbl, flex, align), cell in zip(columns, r):
+            text, color = cell if isinstance(cell, tuple) else (cell, None)
+            cells.append(html.Div(text, style=dict(
+                flex=flex, fontSize="12.5px", color=color or T2, textAlign=align,
+                fontFamily=_MONO if align == "right" else "inherit",
+                overflow="hidden", textOverflow="ellipsis", whiteSpace="nowrap")))
+        row_els.append(html.Div(cells, style=dict(
+            display="flex", gap="12px", padding="8px 0", borderBottom=_ROW_BORDER)))
+
+    body_style = dict(overflowY="auto", maxHeight=max_height) if max_height else {}
+    return html.Div([header, html.Div(row_els, style=body_style)])
+
+
+# ── Analyst ratings section ──────────────────────────────────────────
+
+def _build_analyst_ratings(yf_data: dict) -> html.Div:
+    """Recommendation distribution (with consensus + bar) and price targets."""
+    recommendations = yf_data.get("recommendations")
+    price_targets = yf_data.get("analyst_price_targets")
+
+    blocks = []
+    total = 0
+
+    # Recommendation distribution — latest month is the first row.
+    if recommendations is not None and not (hasattr(recommendations, "empty") and recommendations.empty):
+        try:
+            latest = recommendations.iloc[0]
+            ratings = {
+                "Strong Buy":  int(latest.get("strongBuy", 0)),
+                "Buy":         int(latest.get("buy", 0)),
+                "Hold":        int(latest.get("hold", 0)),
+                "Sell":        int(latest.get("sell", 0)),
+                "Strong Sell": int(latest.get("strongSell", 0)),
+            }
+            total = sum(ratings.values())
+        except Exception:
+            ratings, total = {}, 0
+
+        if total > 0:
+            colors = {"Strong Buy": "#22c55e", "Buy": "#4ade80", "Hold": "#facc15",
+                      "Sell": "#fb923c", "Strong Sell": "#ef4444"}
+            weighted = sum(w * ratings[k] for k, w in (
+                ("Strong Buy", 5), ("Buy", 4), ("Hold", 3),
+                ("Sell", 2), ("Strong Sell", 1))) / total
+            consensus = ("Strong Buy" if weighted >= 4.2 else "Buy" if weighted >= 3.5
+                         else "Hold" if weighted >= 2.5 else "Sell" if weighted >= 1.5
+                         else "Strong Sell")
+            bar = html.Div([
+                html.Div(style=dict(width=f"{ratings[k] / total * 100:.2f}%",
+                    background=colors[k])) for k in ratings if ratings[k] > 0
+            ], style=dict(display="flex", gap="2px", height="8px",
+                          borderRadius="4px", overflow="hidden",
+                          background="rgba(255,255,255,0.04)"))
+            consensus_pill = html.Div([
+                html.Span("Consensus", style=dict(fontSize="10.5px", color=T4,
+                    textTransform="uppercase", letterSpacing="0.5px")),
+                html.Span(consensus, style=dict(fontSize="13px", fontWeight="600",
+                    color=colors[consensus], marginLeft="8px")),
+            ])
+            tiles = _tile_grid(
+                [_stat_tile(k, str(ratings[k]), color=colors[k]) for k in ratings],
+                min_w="90px")
+            blocks.append(_sub_block("Recommendations", html.Div([
+                consensus_pill,
+                html.Div(bar, style=dict(margin="12px 0 14px")),
+                tiles,
+            ])))
+
+    # Price targets — analyst_price_targets is a dict of dollar figures.
+    if price_targets and isinstance(price_targets, dict):
+        def _num(v):
+            try:
+                f = float(v)
+                return None if f != f else f
+            except (TypeError, ValueError):
+                return None
+        cur, mean, median, high, low = (
+            _num(price_targets.get(k))
+            for k in ("current", "mean", "median", "high", "low"))
+        if any(v is not None for v in (cur, mean, median, high, low)):
+            def _p(v):
+                return "—" if v is None else f"${v:,.2f}"
+            upside = ((mean - cur) / cur * 100) if (mean is not None and cur) else None
+            up_color = ACCENT if (upside or 0) >= 0 else RED
+            up_sub = f"{upside:+.1f}% vs current" if upside is not None else None
+            blocks.append(_sub_block("Price Targets", _tile_grid([
+                _stat_tile("Current", _p(cur)),
+                _stat_tile("Mean", _p(mean), color=up_color, sub=up_sub),
+                _stat_tile("Median", _p(median)),
+                _stat_tile("High", _p(high), color=ACCENT),
+                _stat_tile("Low", _p(low), color=RED),
+            ], min_w="105px")))
+
+    if not blocks:
+        return html.Div()
+    return _card("Analyst Ratings", blocks,
+                 meta=f"{total} analysts" if total else None)
+
+
+# ── Institutional holders section ────────────────────────────────────
+
+def _build_institutional_holders(yf_data: dict) -> html.Div:
+    """Ownership breakdown plus top institutional and mutual-fund holders."""
+    info = yf_data.get("info", {})
+    holders = yf_data.get("institutional_holders")
+    major = yf_data.get("major_holders")
+    funds = yf_data.get("mutualfund_holders")
+
+    def _has(df):
+        return df is not None and not (hasattr(df, "empty") and df.empty)
+
+    has_holders, has_major, has_funds = _has(holders), _has(major), _has(funds)
+    if not (has_holders or has_major or has_funds):
+        return html.Div()
+
+    shares_out = info.get("sharesOutstanding")
+
+    # major_holders is indexed by breakdown key (insidersPercentHeld,
+    # institutionsPercentHeld, institutionsFloatPercentHeld, institutionsCount)
+    # with a single 'Value' column — not a row per breakdown.
+    insider_pct = inst_pct = float_pct = inst_count = None
+    if has_major:
+        try:
+            col = "Value" if "Value" in major.columns else major.columns[0]
+            vals = {str(k): major.loc[k, col] for k in major.index}
+
+            def _pct(key):
+                try:
+                    return float(vals.get(key)) * 100
+                except (TypeError, ValueError):
+                    return None
+            insider_pct = _pct("insidersPercentHeld")
+            inst_pct = _pct("institutionsPercentHeld")
+            float_pct = _pct("institutionsFloatPercentHeld")
+            try:
+                c = float(vals.get("institutionsCount"))
+                inst_count = int(c) if c == c else None
+            except (TypeError, ValueError):
+                inst_count = None
+        except Exception:
+            pass
+
+    # Fallback: derive institutional % from the holdings table if needed.
+    if inst_pct is None and has_holders and shares_out and "Shares" in holders.columns:
+        try:
+            inst_pct = holders["Shares"].sum() / shares_out * 100
+        except Exception:
+            pass
+
+    blocks = []
+
+    breakdown = []
+    if inst_pct is not None:
+        breakdown.append(_stat_tile("Institutional", f"{inst_pct:.1f}%"))
+    if float_pct is not None:
+        breakdown.append(_stat_tile("Inst. of Float", f"{float_pct:.1f}%"))
+    if insider_pct is not None:
+        breakdown.append(_stat_tile("Insiders", f"{insider_pct:.2f}%"))
+    if inst_count is not None:
+        breakdown.append(_stat_tile("# Institutions", f"{inst_count:,}"))
+    if breakdown:
+        blocks.append(_sub_block("Ownership Breakdown",
+            _tile_grid(breakdown, min_w="130px")))
+
+    def _holder_rows(df):
+        rows = []
+        for _, r in df.iterrows():
+            name = str(r.get("Holder", ""))
+            shares, value = r.get("Shares"), r.get("Value")
+            try:
+                sh = f"{float(shares) / 1e6:.1f}M"
+            except (TypeError, ValueError):
+                sh = "—"
+            try:
+                po = f"{float(r.get('pctHeld')) * 100:.2f}%"
+            except (TypeError, ValueError):
+                po = (f"{float(shares) / shares_out * 100:.2f}%"
+                      if shares_out and shares else "—")
+            try:
+                v = float(value)
+                vv = f"${v / 1e9:.1f}B" if v >= 1e9 else f"${v / 1e6:.0f}M"
+            except (TypeError, ValueError):
+                vv = "—"
+            try:
+                cv = float(r.get("pctChange")) * 100
+                chg = (f"{cv:+.2f}%", ACCENT if cv >= 0 else RED)
+            except (TypeError, ValueError):
+                chg = ("—", T4)
+            rows.append([name, sh, po, vv, chg])
+        return rows
+
+    cols = [("Holder", "2", "left"), ("Shares", "1", "right"),
+            ("% Out", "1", "right"), ("Value", "1", "right"),
+            ("Chg", "0 0 70px", "right")]
+    if has_holders:
+        blocks.append(_sub_block("Top Institutional Holders",
+            _table(cols, _holder_rows(holders), max_height="280px")))
+    if has_funds:
+        blocks.append(_sub_block("Top Mutual Fund Holders",
+            _table([("Fund", "2", "left"), *cols[1:]],
+                   _holder_rows(funds), max_height="280px")))
+
+    if not blocks:
+        return html.Div()
+    return _card("Ownership & Holders", blocks)
+
+
+# ── Earnings estimates section ───────────────────────────────────────
+
+def _build_earnings_estimates(yf_data: dict) -> html.Div:
+    """Upcoming earnings date plus EPS and revenue estimate tables."""
+    earnings_est = yf_data.get("earnings_estimate")
+    revenue_est = yf_data.get("revenue_estimate")
+    calendar = yf_data.get("calendar")
+
+    def _has(df):
+        return df is not None and not (hasattr(df, "empty") and df.empty)
+
+    blocks = []
+
+    # Upcoming earnings — from the calendar dict.
+    if calendar and isinstance(calendar, dict):
+        ed = calendar.get("Earnings Date")
+        e_lo, e_hi = calendar.get("Earnings Low"), calendar.get("Earnings High")
+        r_lo, r_hi = calendar.get("Revenue Low"), calendar.get("Revenue High")
+        date_display = "—"
+        if ed:
+            try:
+                d0 = ed[0] if isinstance(ed, list) else ed
+                date_display = (d0.strftime("%b %d, %Y")
+                                if hasattr(d0, "strftime") else str(d0)[:10])
+            except Exception:
+                date_display = str(ed)[:10]
+        # The calendar ranges are for the upcoming quarter, so the reference
+        # must be the same quarter a year ago (from the current-quarter '0q'
+        # estimate row) — not a trailing-twelve-month figure.
+        def _year_ago(df, col):
+            try:
+                if df is not None and "0q" in df.index:
+                    v = float(df.loc["0q", col])
+                    return None if v != v else v
+            except (TypeError, ValueError, KeyError):
+                pass
+            return None
+        ya_eps = _year_ago(earnings_est, "yearAgoEps")
+        ya_rev = _year_ago(revenue_est, "yearAgoRevenue")
+        eps_sub = f"Year-ago Q: ${ya_eps:.2f}" if ya_eps is not None else None
+        rev_sub = f"Year-ago Q: {_fmt_large(ya_rev)}" if ya_rev is not None else None
+
+        cal_tiles = [_stat_tile("Next Earnings", date_display, color=ACCENT)]
+        if e_lo and e_hi:
+            cal_tiles.append(_stat_tile("Next-Q EPS Est.",
+                f"${e_lo:.2f} – ${e_hi:.2f}", sub=eps_sub))
+        if r_lo and r_hi:
+            cal_tiles.append(_stat_tile("Next-Q Revenue Est.",
+                f"{_fmt_large(r_lo)} – {_fmt_large(r_hi)}", sub=rev_sub))
+        blocks.append(_sub_block("Upcoming", _tile_grid(cal_tiles, min_w="150px")))
+
+    def _est_rows(df, is_rev):
+        labels = {"0q": "Current Quarter", "+1q": "Next Quarter",
+                  "0y": "Current Year", "+1y": "Next Year", "LTG": "Long-term"}
+        rows = []
+        for idx in df.index:
+            r = df.loc[idx]
+
+            def _v(x):
+                try:
+                    f = float(x)
+                    if f != f:
+                        return "—"
+                    return _fmt_large(f) if is_rev else f"${f:.2f}"
+                except (TypeError, ValueError):
+                    return "—"
+            try:
+                gf = float(r.get("growth")) * 100
+                gcell = (("—", T4) if gf != gf
+                         else (f"{gf:+.1f}%", ACCENT if gf >= 0 else RED))
+            except (TypeError, ValueError):
+                gcell = ("—", T4)
+            try:
+                nn = str(int(float(r.get("numberOfAnalysts"))))
+            except (TypeError, ValueError):
+                nn = "—"
+            rows.append([labels.get(str(idx), str(idx)), (_v(r.get("avg")), T1),
+                         _v(r.get("low")), _v(r.get("high")), nn, gcell])
+        return rows
+
+    ecols = [("Period", "0 0 120px", "left"), ("Avg", "1", "right"),
+             ("Low", "1", "right"), ("High", "1", "right"),
+             ("# Est", "0 0 55px", "right"), ("Growth", "1", "right")]
+    if _has(earnings_est):
+        blocks.append(_sub_block("EPS Estimates",
+            _table(ecols, _est_rows(earnings_est, False))))
+    if _has(revenue_est):
+        blocks.append(_sub_block("Revenue Estimates",
+            _table(ecols, _est_rows(revenue_est, True))))
+
+    if not blocks:
+        return html.Div()
+    return _card("Earnings Estimates", blocks)
+
+
+# ── Earnings history section ─────────────────────────────────────────
+
+def _eps_surprise_chart(recs: list) -> "dcc.Graph":
+    """Grouped estimate-vs-actual EPS bars, actual coloured green (beat) or
+    red (miss), with the surprise % labelled above each quarter.
+
+    ``recs`` is drawn in the order given (most-recent first → newest on the
+    left); each is a dict with label / estimate / actual / surprise.
+    """
+    import plotly.graph_objects as go
+
+    x = [r["label"] for r in recs]
+    est = [r["estimate"] for r in recs]
+    act = [r["actual"] for r in recs]
+    beat = [(a is not None and e is not None and a >= e) for a, e in zip(act, est)]
+    act_colors = [ACCENT if b else RED for b in beat]
+    labels = [("" if r["surprise"] is None else f"{r['surprise'] * 100:+.1f}%")
+              for r in recs]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=x, y=est, name="Estimate",
+        marker_color="rgba(255,255,255,0.20)",
+        hovertemplate="Estimate: $%{y:.2f}<extra></extra>"))
+    fig.add_trace(go.Bar(
+        x=x, y=act, name="Actual", marker_color=act_colors,
+        text=labels, textposition="outside", cliponaxis=False,
+        textfont=dict(family="JetBrains Mono, monospace", size=10, color=T3),
+        hovertemplate="Actual: $%{y:.2f}<extra></extra>"))
+    fig.update_layout(
+        template="plotly_dark", barmode="group", bargap=0.35, bargroupgap=0.1,
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=44, r=12, t=22, b=28), height=220,
+        showlegend=True,
+        legend=dict(orientation="h", x=0, y=1.08, xanchor="left", yanchor="bottom",
+                    bgcolor="rgba(0,0,0,0)", font=dict(size=11, color=T3)),
+        hovermode="x unified",
+        hoverlabel=dict(bgcolor="#1b1f28", bordercolor="rgba(255,255,255,0.1)",
+                        font=dict(family="JetBrains Mono, monospace", color=T1, size=12)),
+        xaxis=dict(showgrid=False, color=T4, tickfont=dict(size=10)),
+        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)", zeroline=False,
+                   color=T4, tickfont=dict(size=10), tickprefix="$"),
+        font=dict(family="JetBrains Mono, monospace", color=T3))
+    return dcc.Graph(figure=fig, config={"displayModeBar": False},
+                     style=dict(height="220px"))
+
+
+def _earnings_events(yf_data: dict, recs: list) -> list:
+    """Past earnings releases as {date_str, beat, surprise_pct, label}.
+
+    Prefers ``earnings_dates`` (accurate release datetimes + reported/estimate),
+    merging in newer ``earnings_history`` quarter-end dates the feed lacks.
+    """
+    import pandas as pd
+
+    def _num(x):
+        try:
+            v = float(x)
+            return None if v != v else v
+        except (TypeError, ValueError):
+            return None
+
+    ed = yf_data.get("earnings_dates")
+    events = []
+    if ed is not None and not (hasattr(ed, "empty") and ed.empty):
+        try:
+            for idx in ed.index:
+                r = ed.loc[idx]
+                rep = _num(r.get("Reported EPS"))
+                est = _num(r.get("EPS Estimate"))
+                if rep is None:            # future / not yet reported
+                    continue
+                spv = _num(r.get("Surprise(%)"))   # already a percentage
+                if est is not None:
+                    beat = rep >= est
+                elif spv is not None:
+                    beat = spv >= 0
+                else:
+                    beat = True
+                ds = (idx.strftime("%Y-%m-%d")
+                      if hasattr(idx, "strftime") else str(idx)[:10])
+                lbl = (idx.strftime("%b %d, %Y")
+                       if hasattr(idx, "strftime") else ds)
+                events.append({"date_str": ds, "beat": bool(beat),
+                               "surprise_pct": spv, "label": lbl})
+        except Exception:
+            events = []
+
+    # yfinance's ``earnings_dates`` feed lags — its newest reported release can
+    # be ~a year old, while ``earnings_history`` carries the most recent quarters
+    # (at fiscal quarter-end dates). Merge in any history records newer than the
+    # last dates-feed event so the recent releases still get markers.
+    last_ev = None
+    if events:
+        try:
+            last_ev = max(pd.to_datetime(e["date_str"]) for e in events)
+        except Exception:
+            last_ev = None
+
+    for d in recs:
+        if d["actual"] is None or d["estimate"] is None:
+            continue
+        dt = d["date"]
+        dts = pd.to_datetime(dt)
+        if last_ev is not None and dts <= last_ev:
+            continue                         # already covered by the dates feed
+        events.append({
+            "date_str": (dt.strftime("%Y-%m-%d")
+                         if hasattr(dt, "strftime") else str(dt)[:10]),
+            "beat": d["actual"] >= d["estimate"],
+            "surprise_pct": (d["surprise"] * 100
+                             if d["surprise"] is not None else None),
+            "label": d["label"],
+        })
+    return events
+
+
+def _earnings_price_chart(price_bars: list, events: list, ccy: str = "$"):
+    """Price line over the earnings window with a dashed marker at each release
+    (green = beat, red = miss), so pre-event action and post drift are visible.
+    """
+    import plotly.graph_objects as go
+    import pandas as pd
+
+    pts = [(b.get("date"), b.get("close")) for b in (price_bars or [])
+           if b.get("close") is not None and b.get("date")]
+    if len(pts) < 2:
+        return None
+    xs_all = pd.to_datetime([p[0] for p in pts])
+    ys_all = [float(p[1]) for p in pts]
+
+    # Focus the window on the span of the earnings events (+ padding for
+    # pre-event action and post-earnings drift). yfinance's earnings feed can
+    # lag the price feed, so a fixed trailing window may contain no releases —
+    # clipping to the events guarantees the markers are visible.
+    ev_dates = [pd.to_datetime(e["date_str"]) for e in events]
+    ev_in = [d for d in ev_dates if xs_all.min() <= d <= xs_all.max()]
+    if ev_in:
+        lo_clip = min(ev_in) - pd.Timedelta(days=30)
+        # Extend to the latest available price so the line runs to today —
+        # yfinance's earnings feed lags the price feed, so clipping to the last
+        # release would end the chart ~a year short of the current date.
+        hi_clip = max(max(ev_in) + pd.Timedelta(days=60), xs_all.max())
+        clipped = [(x, y) for x, y in zip(xs_all, ys_all)
+                   if lo_clip <= x <= hi_clip]
+        xs, ys = ((pd.DatetimeIndex([c[0] for c in clipped]),
+                   [c[1] for c in clipped]) if len(clipped) >= 2
+                  else (xs_all, ys_all))
+    else:
+        xs, ys = xs_all, ys_all
+
+    lo_x, hi_x = xs.min(), xs.max()
+    ymin, ymax = min(ys), max(ys)
+    pad = (ymax - ymin) * 0.08 or 1.0
+    y0, y1 = ymin - pad, ymax + pad
+    close_by = dict(zip(xs, ys))
+    ordered_x = list(xs)
+
+    fig = go.Figure()
+    # Event lines first, so the price line sits on top of them.
+    for e in events:
+        d = pd.to_datetime(e["date_str"])
+        if d < lo_x or d > hi_x:
+            continue
+        fig.add_trace(go.Scatter(
+            x=[d, d], y=[y0, y1], mode="lines",
+            line=dict(color=ACCENT if e["beat"] else RED, width=1, dash="dot"),
+            opacity=0.5, hoverinfo="skip", showlegend=False))
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys, mode="lines", line=dict(color="#7fb2ff", width=1.6),
+        hovertemplate="%{x|%d %b %Y}<br>" + ccy + "%{y:.2f}<extra></extra>",
+        showlegend=False))
+    # A dot on the price line at each release, with a beat/miss hover label.
+    mx, my, mc, mt = [], [], [], []
+    for e in events:
+        d = pd.to_datetime(e["date_str"])
+        if d < lo_x or d > hi_x:
+            continue
+        prior = [x for x in ordered_x if x <= d]
+        px = prior[-1] if prior else next((x for x in ordered_x if x >= d), None)
+        if px is None:
+            continue
+        mx.append(px); my.append(close_by[px])
+        mc.append(ACCENT if e["beat"] else RED)
+        res = "Beat" if e["beat"] else "Missed"
+        sp = e.get("surprise_pct")
+        mt.append(f"{e['label']} · {res}"
+                  + (f" ({sp:+.1f}%)" if sp is not None else ""))
+    if mx:
+        fig.add_trace(go.Scatter(
+            x=mx, y=my, mode="markers",
+            marker=dict(size=9, color=mc, line=dict(width=1.5, color="#0a0c10")),
+            hovertext=mt, hoverinfo="text", showlegend=False))
+
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=44, r=12, t=10, b=28), height=200, showlegend=False,
+        hoverlabel=dict(bgcolor="#1b1f28", bordercolor="rgba(255,255,255,0.1)",
+                        font=dict(family="JetBrains Mono, monospace", color=T1, size=12)),
+        xaxis=dict(showgrid=False, color=T4, tickfont=dict(size=10),
+                   range=[lo_x, hi_x]),
+        yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)", zeroline=False,
+                   color=T4, tickfont=dict(size=10), tickprefix=ccy, range=[y0, y1]),
+        font=dict(family="JetBrains Mono, monospace", color=T3))
+    return dcc.Graph(figure=fig, config={"displayModeBar": False},
+                     style=dict(height="200px"))
+
+
+def _build_earnings_history(yf_data: dict, price_bars: list = None) -> html.Div:
+    """Price-with-earnings-markers chart, estimate-vs-actual surprise chart,
+    and the recent history table."""
+    history = yf_data.get("earnings_history")
+    if history is None or (hasattr(history, "empty") and history.empty):
+        return html.Div()
+
+    try:
+        def _f(x):
+            try:
+                v = float(x)
+                return None if v != v else v
+            except (TypeError, ValueError):
+                return None
+
+        recs = []
+        for idx in history.index:
+            r = history.loc[idx]
+            recs.append({
+                "date": idx,
+                "label": (idx.strftime("%b '%y")
+                          if hasattr(idx, "strftime") else str(idx)[:10]),
+                "estimate": _f(r.get("epsEstimate")),
+                "actual": _f(r.get("epsActual")),
+                "surprise": _f(r.get("surprisePercent")),
+            })
+
+        ccy = ccy_symbol((yf_data.get("info") or {}).get("currency"))
+        blocks = []
+
+        # Price around earnings — chronological (old→new), events marked.
+        events = _earnings_events(yf_data, recs)
+        if price_bars and events:
+            price_chart = _earnings_price_chart(price_bars, events, ccy=ccy)
+            if price_chart is not None:
+                blocks.append(_sub_block("Price Around Earnings", price_chart))
+
+        # Estimate vs actual — newest on the LEFT, oldest on the right.
+        try:
+            chart_recs = sorted(recs, key=lambda d: d["date"], reverse=True)
+        except Exception:
+            chart_recs = list(recs)
+        chart_recs = [d for d in chart_recs
+                      if d["estimate"] is not None or d["actual"] is not None]
+        if chart_recs:
+            blocks.append(_sub_block("Estimate vs Actual EPS",
+                _eps_surprise_chart(chart_recs)))
+
+        # Table — as delivered (most recent first).
+        def _eps(v):
+            return "—" if v is None else f"${v:.2f}"
+        trows = []
+        for d in recs:
+            sp = d["surprise"]
+            scell = (("—", T4) if sp is None
+                     else (f"{sp * 100:+.1f}%", ACCENT if sp >= 0 else RED))
+            trows.append([d["label"], (_eps(d["actual"]), T1),
+                          _eps(d["estimate"]), scell])
+        cols = [("Quarter", "1", "left"), ("Actual", "1", "right"),
+                ("Estimate", "1", "right"), ("Surprise", "1", "right")]
+        blocks.append(_sub_block("History", _table(cols, trows)))
+
+        return _card("Earnings History", blocks)
+    except Exception:
+        return html.Div()
+
+
+# ── Insider activity section ─────────────────────────────────────────
+
+def _buy_sell_bar(buy, sell):
+    """Split bar summarising 6-month insider flow: green = shares bought,
+    red = shares sold, with the counts labelled on each side."""
+    buy, sell = max(buy or 0, 0), max(sell or 0, 0)
+    total = buy + sell
+    if total <= 0:
+        return None
+
+    def _fmt(v):
+        return f"{v / 1e6:,.1f}M" if v >= 1e6 else f"{v / 1e3:,.0f}K"
+    caption = html.Div([
+        html.Span([html.Span("Bought ", style=dict(color=T4)),
+                   html.Span(_fmt(buy), style=dict(color=ACCENT, fontWeight="600"))]),
+        html.Span([html.Span(_fmt(sell), style=dict(color=RED, fontWeight="600")),
+                   html.Span(" Sold", style=dict(color=T4))]),
+    ], style=dict(display="flex", justifyContent="space-between",
+                  fontFamily=_MONO, fontSize="11.5px", marginBottom="6px"))
+    bar = html.Div([
+        html.Div(style=dict(width=f"{buy / total * 100:.1f}%", background=ACCENT)),
+        html.Div(style=dict(width=f"{sell / total * 100:.1f}%", background=RED)),
+    ], style=dict(display="flex", height="8px", borderRadius="4px",
+                  overflow="hidden", background="rgba(255,255,255,0.06)"))
+    return html.Div([caption, bar])
+
+
+def _build_insider_activity(yf_data: dict) -> html.Div:
+    """Six-month insider buy/sell summary plus recent transactions."""
+    purchases = yf_data.get("insider_purchases")
+    transactions = yf_data.get("insider_transactions")
+
+    def _has(df):
+        return df is not None and not (hasattr(df, "empty") and df.empty)
+
+    blocks = []
+
+    # 6-month summary — the first column holds the row labels (Purchases,
+    # Sales, Net Shares Purchased (Sold), Total Insider Shares Held, …).
+    if _has(purchases):
+        try:
+            tiles = []
+            buy_sh = sell_sh = None
+            label_col = purchases.columns[0]
+            for _, r in purchases.iterrows():
+                label = str(r.get(label_col, ""))
+                low = label.lower()
+                if not label or low.startswith("%"):
+                    continue  # percentage rows aren't share counts
+                try:
+                    shv = float(r.get("Shares"))
+                except (TypeError, ValueError):
+                    continue
+                if shv != shv:
+                    continue
+                if "sale" in low:
+                    color = RED
+                    sell_sh = abs(shv)
+                elif "purchase" in low and "net" not in low:
+                    color = ACCENT
+                    buy_sh = abs(shv)
+                elif "net" in low:
+                    color = ACCENT if shv >= 0 else RED
+                else:
+                    color = T1
+                sub = None
+                try:
+                    sub = f"{int(float(r.get('Trans')))} transactions"
+                except (TypeError, ValueError):
+                    pass
+                tiles.append(_stat_tile(label, f"{shv / 1e3:,.0f}K Shares",
+                                        color=color, sub=sub))
+            if tiles:
+                body = [_tile_grid(tiles, min_w="150px")]
+                bar = _buy_sell_bar(buy_sh, sell_sh)
+                if bar is not None:
+                    body.append(bar)
+                blocks.append(_sub_block("Insider Activity (6 months)",
+                    html.Div(body, style=dict(display="flex",
+                             flexDirection="column", gap="14px"))))
+        except Exception:
+            pass
+
+    # Recent transactions — the date column is 'Start Date'.
+    if _has(transactions):
+        try:
+            rows = []
+            for _, r in transactions.head(12).iterrows():
+                sd = r.get("Start Date")
+                date_display = "—"
+                if sd is not None and sd == sd:
+                    try:
+                        date_display = (sd.strftime("%b %d, %Y")
+                                        if hasattr(sd, "strftime") else str(sd)[:10])
+                    except Exception:
+                        date_display = str(sd)[:10]
+                insider = str(r.get("Insider") or "")
+                ttype = str(r.get("Text") or r.get("Transaction") or "—")
+                try:
+                    shv = float(r.get("Shares"))
+                    scell = ((f"{shv:+,.0f}", ACCENT if shv >= 0 else RED)
+                             if shv and shv == shv else ("—", T4))
+                except (TypeError, ValueError):
+                    scell = ("—", T4)
+                # A 0 value means the price wasn't reported (option exercises,
+                # gifts, Form 4 entries without a price) — not a $0 trade.
+                try:
+                    val = float(r.get("Value"))
+                    vv = "—" if (val != val or val == 0) else f"${val:,.0f}"
+                except (TypeError, ValueError):
+                    vv = "—"
+                rows.append([date_display, (insider, T2), (ttype, T3), scell, vv])
+            cols = [("Date", "0 0 90px", "left"), ("Insider", "1.4", "left"),
+                    ("Type", "1", "left"), ("Shares", "1", "right"),
+                    ("Value", "1", "right")]
+            blocks.append(_sub_block("Recent Transactions",
+                _table(cols, rows, max_height="300px")))
+        except Exception:
+            pass
+
+    if not blocks:
+        return html.Div()
+    return _card("Insider Activity", blocks)
+
+
+# ── Analyst revisions section ────────────────────────────────────────
+
+def _build_analyst_revisions(yf_data: dict) -> html.Div:
+    """EPS estimate revisions (raised/cut), EPS trend, and stock-vs-index growth."""
+    eps_rev = yf_data.get("eps_revisions")
+    eps_tr = yf_data.get("eps_trend")
+    growth = yf_data.get("growth_estimates")
+
+    def _has(df):
+        return df is not None and not (hasattr(df, "empty") and df.empty)
+
+    P = {"0q": "Current Quarter", "+1q": "Next Quarter",
+         "0y": "Current Year", "+1y": "Next Year",
+         "+5y": "Long-term", "-5y": "Past 5y", "LTG": "Long-term"}
+    blocks = []
+
+    def _mini(label, text, color):
+        return html.Div([
+            html.Div(label, style=dict(fontSize="9px", color=T5, letterSpacing="0.5px")),
+            html.Div(text, style=dict(fontSize="13px", fontWeight="600",
+                color=color, fontFamily=_MONO)),
+        ], style=dict(textAlign="center", padding="6px 8px", flex="1",
+                      background=_TILE_BG, borderRadius="6px"))
+
+    def _period_card(idx, minis):
+        return html.Div([
+            html.Div(P.get(str(idx), str(idx)), style=dict(
+                fontSize="12px", color=T2, fontWeight="500", marginBottom="8px")),
+            html.Div(minis, style=dict(display="flex", gap="6px")),
+        ], style=dict(padding="10px 12px", background="rgba(255,255,255,0.02)",
+                      borderRadius="8px", border="1px solid rgba(255,255,255,0.04)"))
+
+    # EPS revisions — how many analysts raised vs cut their estimate, shown
+    # explicitly (↑ raised / ↓ cut) with a split bar, over 30 and 7 days.
+    def _rev_window(label, up, dn):
+        total = up + dn
+        bar = html.Div([
+            html.Div(style=dict(width=f"{(up / total * 100) if total else 0:.0f}%",
+                                background=ACCENT)),
+            html.Div(style=dict(width=f"{(dn / total * 100) if total else 0:.0f}%",
+                                background=RED)),
+        ], style=dict(display="flex", height="5px", borderRadius="3px",
+                      overflow="hidden", marginTop="5px",
+                      background="rgba(255,255,255,0.06)"))
+        head = html.Div([
+            html.Span(label, style=dict(fontSize="9.5px", color=T5,
+                fontWeight="600", letterSpacing="0.5px")),
+            html.Span([
+                html.Span(f"↑ {up}", style=dict(color=ACCENT if up else T4,
+                    fontWeight="600")),
+                html.Span(f"↓ {dn}", style=dict(color=RED if dn else T4,
+                    fontWeight="600", marginLeft="12px")),
+            ], style=dict(fontFamily=_MONO, fontSize="11.5px")),
+        ], style=dict(display="flex", justifyContent="space-between",
+                      alignItems="center"))
+        return html.Div([head, bar])
+
+    def _rev_card(idx, up7, dn7, up30, dn30):
+        if up7 + dn7 + up30 + dn30 == 0:
+            body = html.Div("No recent revisions", style=dict(
+                fontSize="11px", color=T5, fontStyle="italic", padding="6px 0"))
+        else:
+            body = html.Div([_rev_window("30 DAYS", up30, dn30),
+                             _rev_window("7 DAYS", up7, dn7)],
+                style=dict(display="flex", flexDirection="column", gap="10px"))
+        return html.Div([
+            html.Div(P.get(str(idx), str(idx)), style=dict(
+                fontSize="12px", color=T2, fontWeight="600", marginBottom="10px")),
+            body,
+        ], style=dict(padding="12px 14px", background="rgba(255,255,255,0.02)",
+                      borderRadius="8px", border="1px solid rgba(255,255,255,0.04)"))
+
+    if _has(eps_rev):
+        try:
+            def _i(r, k):
+                try:
+                    return int(r.get(k, 0))
+                except (TypeError, ValueError):
+                    return 0
+            items = [_rev_card(idx,
+                        _i(eps_rev.loc[idx], "upLast7days"),
+                        _i(eps_rev.loc[idx], "downLast7days"),
+                        _i(eps_rev.loc[idx], "upLast30days"),
+                        _i(eps_rev.loc[idx], "downLast30days"))
+                     for idx in eps_rev.index]
+            blocks.append(_sub_block("EPS Estimate Revisions (↑ raised · ↓ cut)",
+                _tile_grid(items, min_w="190px")))
+        except Exception:
+            pass
+
+    # EPS trend — current estimate vs 90 days ago.
+    if _has(eps_tr):
+        try:
+            rows = []
+            for idx in eps_tr.index:
+                r = eps_tr.loc[idx]
+                try:
+                    cf = float(r.get("current"))
+                    cur_s = "—" if cf != cf else f"${cf:.2f}"
+                except (TypeError, ValueError):
+                    cf, cur_s = None, "—"
+                try:
+                    af = float(r.get("90daysAgo"))
+                    if cf is None or af != af or af == 0:
+                        chg = ("—", T4)
+                    else:
+                        d = (cf - af) / abs(af) * 100
+                        chg = (f"{d:+.1f}%", ACCENT if d >= 0 else RED)
+                except (TypeError, ValueError):
+                    chg = ("—", T4)
+                rows.append([P.get(str(idx), str(idx)), (cur_s, T1), chg])
+            cols = [("Period", "1", "left"), ("Current Est.", "1", "right"),
+                    ("90D Change", "1", "right")]
+            blocks.append(_sub_block("EPS Trend", _table(cols, rows)))
+        except Exception:
+            pass
+
+    # Growth estimates — stock vs index (columns are 'stock' / 'index').
+    if _has(growth):
+        try:
+            gcols = list(growth.columns)
+            stock_col = next((c for c in ("stock", "stockTrend") if c in gcols), None)
+            index_col = next((c for c in ("index", "indexTrend") if c in gcols), None)
+
+            def _gmini(label, val):
+                try:
+                    f = float(val) * 100
+                    return _mini(label, f"{f:+.1f}%", ACCENT if f >= 0 else RED)
+                except (TypeError, ValueError):
+                    return _mini(label, "—", T4)
+            items = []
+            for idx in growth.index:
+                r = growth.loc[idx]
+                minis = []
+                if stock_col:
+                    minis.append(_gmini("Stock", r.get(stock_col)))
+                if index_col:
+                    minis.append(_gmini("Index", r.get(index_col)))
+                if minis:
+                    items.append(_period_card(idx, minis))
+            if items:
+                blocks.append(_sub_block("Growth Estimates",
+                    _tile_grid(items, min_w="130px")))
+        except Exception:
+            pass
+
+    if not blocks:
+        return html.Div()
+    return _card("Analyst Revisions", blocks)
+
+
+# ── SEC filings section ──────────────────────────────────────────────
+# The full filing list is stashed in ``sec-filings-store`` and rendered by the
+# filter callback below, so the year / type dropdowns can narrow it client-side
+# without re-fetching. The card title and dropdowns live in the static layout.
+
+# Dual-class US issuers where Yahoo attaches EDGAR filings to only one ticker.
+# When the requested class returns nothing we retry the sibling(s) — same CIK,
+# same filings.
+_SEC_FILING_ALTS = {
+    "GOOGL": ["GOOG"],   "GOOG": ["GOOGL"],
+    "BRK-B": ["BRK-A"],  "BRK-A": ["BRK-B"],
+    "BRK.B": ["BRK.A"],  "BRK.A": ["BRK.B"],
+    "BF-B":  ["BF-A"],   "BF-A":  ["BF-B"],
+    "LEN-B": ["LEN"],    "HEI-A": ["HEI"],
+    "UHAL-B": ["UHAL"],
+}
+
+
+def _sec_filing_alt_tickers(symbol: str) -> list:
+    """Sibling share-class tickers to try when a symbol has no SEC filings."""
+    s = (symbol or "").upper()
+    alts = list(_SEC_FILING_ALTS.get(s, []))
+    # Generic ``ROOT-A`` / ``ROOT.B`` share-class swap (e.g. FOO-B → FOO-A/FOO).
+    for sep in ("-", "."):
+        if len(s) > 2 and s[-2] == sep and s[-1].isalpha():
+            root = s[:-2]
+            for cand in (root, f"{root}{sep}A", f"{root}{sep}B", f"{root}{sep}C"):
+                if cand != s and cand not in alts:
+                    alts.append(cand)
+    return alts
+
+
+def _fetch_sec_filings(symbol: str, primary):
+    """``primary`` is the requested ticker's ``sec_filings``; fall back to a
+    sibling share class if it carries none."""
+    if isinstance(primary, list) and primary:
+        return primary
+    import yfinance as yf
+    for alt in _sec_filing_alt_tickers(symbol):
+        try:
+            sf = yf.Ticker(alt).sec_filings
+            if isinstance(sf, list) and sf:
+                return sf
+        except Exception:
+            continue
+    return primary
+
+
+# ── ASX announcements (unofficial) ────────────────────────────────────
+# yfinance's ``sec_filings`` is US EDGAR only. ASX-listed names (``.AX``) file
+# continuous-disclosure announcements with the ASX instead. This pulls them from
+# the backend that powers ASX's own company pages (MarkitDigital). It is an
+# UNDOCUMENTED endpoint with no SLA — intended for internal research only. Keep
+# a short in-process cache so a repeat view of the same security is a no-op.
+_ASX_ANN_URL = ("https://asx.api.markitdigital.com/asx-research/1.0/"
+                "companies/{code}/announcements")
+# Public token embedded in ASX's own company pages, used to resolve the PDF.
+_ASX_DOC_TOKEN = "83ff96335c2d45a094df02a206a39ff4"
+_ASX_DOC_URL = ("https://cdn-api.markitdigital.com/apiman-gateway/ASX/"
+                "asx-research/1.0/file/{key}?access_token=" + _ASX_DOC_TOKEN)
+_ASX_CACHE = {}          # code -> (fetched_at_epoch, rows)
+_ASX_CACHE_TTL = 900     # seconds
+
+
+def _asx_announcements(code: str, limit: int = 200) -> list:
+    """ASX company announcements, shaped like yfinance filing dicts so the
+    existing normaliser handles them uniformly. Returns [] on any failure."""
+    import time
+    code = (code or "").upper()
+    if not code:
+        return []
+    hit = _ASX_CACHE.get(code)
+    if hit and (time.time() - hit[0]) < _ASX_CACHE_TTL:
+        return hit[1]
+
+    import requests
+    from datetime import datetime
+    rows = []
+    try:
+        r = requests.get(_ASX_ANN_URL.format(code=code),
+                         params={"pageSize": limit},
+                         headers={"User-Agent": "Mozilla/5.0"}, timeout=12)
+        items = (((r.json() or {}).get("data") or {}).get("items") or []
+                 if r.status_code == 200 else [])
+    except Exception:
+        items = []
+
+    for it in items:
+        raw = it.get("date")
+        try:
+            dt = (datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                  if isinstance(raw, str) else None)
+        except Exception:
+            dt = None
+        key = it.get("documentKey")
+        headline = it.get("headline") or ""
+        rows.append({
+            "date": dt or (raw[:10] if isinstance(raw, str) else raw),
+            "type": (it.get("announcementType") or "").title(),
+            "title": (("★ " if it.get("isPriceSensitive") else "") + headline),
+            "edgarUrl": _ASX_DOC_URL.format(key=key) if key else "",
+            "_source": "asx",
+        })
+
+    if rows:                              # only cache good pulls
+        _ASX_CACHE[code] = (time.time(), rows)
+    return rows
+
+
+def _sec_filings_payload(yf_data: dict) -> list:
+    """Normalise ``sec_filings`` into JSON-serialisable rows for the store.
+
+    Returns every filing yfinance supplies (no cap), newest first.
+    """
+    filings = yf_data.get("sec_filings")
+    if not filings or not isinstance(filings, list):
+        return []
+    out = []
+    for f in filings:
+        date = f.get("date")
+        try:
+            ds = (date.strftime("%Y-%m-%d")
+                  if hasattr(date, "strftime") else str(date)[:10])
+        except Exception:
+            ds = str(date)[:10] if date else ""
+        try:
+            disp = (date.strftime("%b %d, %Y")
+                    if hasattr(date, "strftime") else ds)
+        except Exception:
+            disp = ds
+        year = int(ds[:4]) if ds[:4].isdigit() else None
+        out.append({
+            "date": ds, "date_disp": disp or "—", "year": year,
+            "type": (f.get("type") or "").strip(),
+            "title": f.get("title") or "",
+            "url": f.get("edgarUrl") or "",
+            "source": f.get("_source") or "sec",
+        })
+    out.sort(key=lambda r: r["date"], reverse=True)
+    return out
+
+
+def _sec_filings_table(filings: list) -> html.Div:
+    """Render the filings table from normalised store rows."""
+    rows = []
+    for f in filings:
+        ftype = f.get("type", "")
+        type_color = (ACCENT if ("10-K" in ftype or "10-Q" in ftype)
+                      else "#60a5fa" if "8-K" in ftype else T2)
+        title, url = f.get("title", ""), f.get("url", "")
+        filing_cell = (html.A(title, href=url, target="_blank",
+                              style=dict(color=T2, textDecoration="none"))
+                       if url else (title, T3))
+        rows.append([f.get("date_disp", "—"), (ftype, type_color), filing_cell])
+    if not rows:
+        return html.Div("No filings match the selected filters.",
+            style=dict(color=T4, fontSize="12.5px", padding="16px 0"))
+    cols = [("Date", "0 0 90px", "left"), ("Type", "0 0 60px", "left"),
+            ("Filing", "1", "left")]
+    return _table(cols, rows, max_height="360px")
+
+
 # ── Price card helper ─────────────────────────────────────────────────
 
 def _sec_price_card(label, value, sub="", color=None):
@@ -743,29 +1890,66 @@ def update_fin_table(stmt, period, symbol):
     Output("sec-financials-metrics","children"),
     Output("sec-financials-card",   "style"),
     Output("sec-news-card",         "children"),
+    Output("sec-analyst-card",      "children"),
+    Output("sec-analyst-card",      "style"),
+    Output("sec-institutional-card","children"),
+    Output("sec-institutional-card","style"),
+    Output("sec-earnings-card",     "children"),
+    Output("sec-earnings-card",     "style"),
+    Output("sec-earnings-history-card","children"),
+    Output("sec-earnings-history-card","style"),
+    Output("sec-insider-card",      "children"),
+    Output("sec-insider-card",      "style"),
+    Output("sec-revisions-card",    "children"),
+    Output("sec-revisions-card",    "style"),
+    Output("sec-filings-store",     "data"),
+    Output("sec-sec-filings-card",  "style"),
     Output("sec-loading-overlay",   "style", allow_duplicate=True),
     Input("sec-detail-store", "data"),
     prevent_initial_call=True,
 )
 def populate_security_detail(symbol):
     _HIDE = dict(display="none")
-    if not symbol:
-        return (no_update,) * 8 + (_HIDE,)
-
     _CARD_SHOW = dict(background=BG_CARD, border=f"1px solid {BORDER}",
                       borderRadius="14px", padding="20px", display="block")
+    if not symbol:
+        return (no_update,) * 22 + (_HIDE,)
 
     # Run yfinance in parallel with the IBKR wait.
     yf_result = {}
     def _do_yf():
         yf_result.update(_fetch_yf_financials(symbol))
+        try:
+            import yfinance as yf
+            t = yf.Ticker(symbol)
+            yf_result["recommendations"] = t.recommendations
+            yf_result["institutional_holders"] = t.institutional_holders
+            yf_result["major_holders"] = t.major_holders
+            yf_result["mutualfund_holders"] = t.mutualfund_holders
+            yf_result["insider_purchases"] = t.insider_purchases
+            yf_result["insider_transactions"] = t.insider_transactions
+            yf_result["analyst_price_targets"] = t.analyst_price_targets
+            yf_result["earnings_history"] = t.earnings_history
+            yf_result["earnings_dates"] = t.earnings_dates
+            yf_result["earnings_estimate"] = t.earnings_estimate
+            yf_result["revenue_estimate"] = t.revenue_estimate
+            yf_result["eps_revisions"] = t.eps_revisions
+            yf_result["eps_trend"] = t.eps_trend
+            yf_result["growth_estimates"] = t.growth_estimates
+            yf_result["calendar"] = t.calendar
+            if symbol.upper().endswith(".AX"):
+                yf_result["sec_filings"] = _asx_announcements(symbol.split(".")[0])
+            else:
+                yf_result["sec_filings"] = _fetch_sec_filings(symbol, t.sec_filings)
+        except Exception:
+            pass
     yf_thread = threading.Thread(target=_do_yf, daemon=True)
     yf_thread.start()
 
     d = _load_detail(symbol)
     if not d:
         yf_thread.join(timeout=1)
-        return (no_update,) * 8 + (_HIDE,)
+        return (no_update,) * 22 + (_HIDE,)
 
     yf_thread.join(timeout=10)
 
@@ -825,6 +2009,35 @@ def populate_security_detail(symbol):
 
     fin_metrics = _build_financials_metrics(yf_info)
 
+    # Build all new sections
+    analyst_children = _build_analyst_ratings(yf_result)
+    has_analyst = bool(analyst_children.children) if hasattr(analyst_children, 'children') else False
+    analyst_style = _CARD_SHOW if has_analyst else _HIDE
+
+    inst_children = _build_institutional_holders(yf_result)
+    has_inst = bool(inst_children.children) if hasattr(inst_children, 'children') else False
+    inst_style = _CARD_SHOW if has_inst else _HIDE
+
+    earnings_children = _build_earnings_estimates(yf_result)
+    has_earnings = bool(earnings_children.children) if hasattr(earnings_children, 'children') else False
+    earnings_style = _CARD_SHOW if has_earnings else _HIDE
+
+    earnings_hist_children = _build_earnings_history(
+        yf_result, price_bars=(d.get("daily_5y") or d.get("daily_1y")))
+    has_earnings_hist = bool(earnings_hist_children.children) if hasattr(earnings_hist_children, 'children') else False
+    earnings_hist_style = _CARD_SHOW if has_earnings_hist else _HIDE
+
+    insider_children = _build_insider_activity(yf_result)
+    has_insider = bool(insider_children.children) if hasattr(insider_children, 'children') else False
+    insider_style = _CARD_SHOW if has_insider else _HIDE
+
+    revisions_children = _build_analyst_revisions(yf_result)
+    has_revisions = bool(revisions_children.children) if hasattr(revisions_children, 'children') else False
+    revisions_style = _CARD_SHOW if has_revisions else _HIDE
+
+    sec_filings_data = _sec_filings_payload(yf_result)
+    sec_filings_style = _CARD_SHOW if sec_filings_data else _HIDE
+
     news_children = [html.Div("Latest News", style=dict(
         fontSize="13px", fontWeight="600", color=T2, marginBottom="12px"))]
     try:
@@ -848,7 +2061,94 @@ def populate_security_detail(symbol):
     news_card = html.Div(news_children)
 
     return (name, subtitle, price_header, pos_badge, val_cards,
-            fin_metrics, _CARD_SHOW, news_card, _HIDE)
+            fin_metrics, _CARD_SHOW, news_card,
+            analyst_children, analyst_style,
+            inst_children, inst_style,
+            earnings_children, earnings_style,
+            earnings_hist_children, earnings_hist_style,
+            insider_children, insider_style,
+            revisions_children, revisions_style,
+            sec_filings_data, sec_filings_style,
+            _HIDE)
+
+
+# ── SEC filings filters ───────────────────────────────────────────────
+# When a security loads, populate the year / type dropdowns from the stored
+# filings and default every option to selected. The table callback then reads
+# the current selection and re-renders — no re-fetch needed.
+
+@app.callback(
+    Output("sec-filings-title", "children"),
+    Input("sec-filings-store", "data"),
+)
+def _sec_filings_title(data):
+    """The card carries US EDGAR filings or ASX announcements depending on the
+    security — label it for whichever source is loaded, generic otherwise."""
+    if data:
+        if any(f.get("source") == "asx" for f in data):
+            return "ASX Announcements"
+        return "SEC Filings"
+    return "Filings & Announcements"
+
+
+@app.callback(
+    Output("sec-filings-year", "options"),
+    Output("sec-filings-year", "value"),
+    Output("sec-filings-type", "options"),
+    Output("sec-filings-type", "value"),
+    Input("sec-filings-store", "data"),
+)
+def _sec_filings_filter_options(data):
+    if not data:
+        return [], [], [], []
+    years = sorted({f["year"] for f in data if f.get("year")}, reverse=True)
+    types = sorted({f["type"] for f in data if f.get("type")})
+    year_opts = [{"label": str(y), "value": y} for y in years]
+    type_opts = [{"label": t, "value": t} for t in types]
+    return year_opts, years, type_opts, types  # default: everything selected
+
+
+def _filter_summary(value, options, noun):
+    """Trigger-button text summarising the current checklist selection."""
+    total = len(options or [])
+    chosen = value or []
+    if total == 0 or len(chosen) in (0, total):
+        return f"All {noun}"
+    if len(chosen) <= 2:
+        picked = set(chosen)
+        return ", ".join(str(o["label"]) for o in options if o["value"] in picked)
+    return f"{len(chosen)} of {total} {noun}"
+
+
+@app.callback(
+    Output("sec-filings-year-summary", "children"),
+    Output("sec-filings-type-summary", "children"),
+    Input("sec-filings-year", "value"),
+    Input("sec-filings-type", "value"),
+    State("sec-filings-year", "options"),
+    State("sec-filings-type", "options"),
+)
+def _sec_filings_summaries(year_val, type_val, year_opts, type_opts):
+    return (_filter_summary(year_val, year_opts, "years"),
+            _filter_summary(type_val, type_opts, "types"))
+
+
+@app.callback(
+    Output("sec-filings-table", "children"),
+    Input("sec-filings-year", "value"),
+    Input("sec-filings-type", "value"),
+    Input("sec-filings-store", "data"),
+)
+def _render_sec_filings(years, types, data):
+    if not data:
+        return html.Div()
+    # An empty selection is treated as "no filter on this field" so clearing a
+    # dropdown widens the view rather than blanking the table.
+    ysel, tsel = set(years or []), set(types or [])
+    filtered = [f for f in data
+                if (not ysel or f.get("year") in ysel)
+                and (not tsel or f.get("type") in tsel)]
+    return _sec_filings_table(filtered)
 
 
 # Show the loading overlay the instant a symbol is selected — client-side so

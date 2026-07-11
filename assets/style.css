@@ -309,3 +309,79 @@ input[type="number"] {
     -moz-appearance: textfield !important;
     appearance: textfield !important;
 }
+
+/* ── Filter dropdowns (SEC filings) ── click-to-open checklist menus ── */
+.filter-dd {
+    position: relative;
+}
+.filter-dd > summary {
+    list-style: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 31px;
+    padding: 0 12px;
+    border: 1px solid rgba(255,255,255,0.07);
+    border-radius: 8px;
+    background: transparent;
+    color: #9aa0ad;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: 'JetBrains Mono', monospace;
+    white-space: nowrap;
+    user-select: none;
+}
+.filter-dd > summary::-webkit-details-marker { display: none; }
+.filter-dd > summary::after {
+    content: "\25BE";               /* ▾ */
+    color: #6c7280;
+    font-size: 10px;
+    margin-left: 2px;
+}
+.filter-dd[open] > summary,
+.filter-dd > summary:hover {
+    border-color: rgba(255,255,255,0.13);
+    background: rgba(255,255,255,0.06);
+    color: #e8eaef;
+}
+
+.filter-dd-panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 40;
+    min-width: 150px;
+    max-height: 260px;
+    overflow-y: auto;
+    background: #13161d;
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 8px;
+    box-shadow: 0 12px 28px rgba(0,0,0,0.28);
+    padding: 6px;
+}
+/* dcc.Checklist renders each option as <label><input><span>…</span></label> */
+.filter-dd-panel label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    color: #9aa0ad;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: 'JetBrains Mono', monospace;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.filter-dd-panel label:hover {
+    background: rgba(54,211,153,0.13);
+    color: #e8eaef;
+}
+.filter-dd-panel input[type="checkbox"] {
+    accent-color: #36d399;
+    width: 14px;
+    height: 14px;
+    cursor: pointer;
+    flex-shrink: 0;
+}
