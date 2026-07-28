@@ -11,6 +11,8 @@ visible at a glance.
 import os
 import time
 import datetime
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 import plotly.graph_objects as go
@@ -23,6 +25,7 @@ from dashboard.theme import BG_CARD, BORDER, T1, T2, T3, T4, T5, ACCENT, RED
 # ── FRED API ──────────────────────────────────────────────────────────────────
 _FRED_BASE = "https://api.stlouisfed.org/fred"
 _fred_cache: dict = {}
+_fred_lock  = threading.Lock()
 _FRED_TTL   = 3600  # 1-hour cache
 
 
@@ -38,7 +41,8 @@ def _fetch_fred(series_id: str, limit: int = 1500) -> list:
     """
     now    = time.time()
     ckey   = (series_id, limit)
-    cached = _fred_cache.get(ckey)
+    with _fred_lock:
+        cached = _fred_cache.get(ckey)
 
     if cached and now - cached["ts"] < _FRED_TTL:
         return cached["data"]
@@ -63,11 +67,28 @@ def _fetch_fred(series_id: str, limit: int = 1500) -> list:
             except (ValueError, KeyError, TypeError):
                 pass  # skip "." missing values
         data.reverse()  # API returned newest-first; restore chronological order
-        _fred_cache[ckey] = {"data": data, "ts": now}
+        with _fred_lock:
+            _fred_cache[ckey] = {"data": data, "ts": now}
         return data
     except Exception as e:
         print(f"[FRED] fetch failed for {series_id}: {type(e).__name__}: {e}")
         return cached["data"] if cached else []
+
+
+def _fetch_fred_many(specs) -> dict:
+    """Fetch several FRED series in parallel on a small thread pool.
+
+    ``specs`` is an iterable of ``(series_id, limit)``; entries with a falsy
+    series_id are skipped and duplicates collapsed. Returns
+    ``{(series_id, limit): obs-list}``. Cached series resolve immediately; only
+    cache misses hit the network, each on its own worker.
+    """
+    keys = list(dict.fromkeys((sid, lim) for sid, lim in specs if sid))
+    if not keys:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(keys))) as pool:
+        results = list(pool.map(lambda k: _fetch_fred(*k), keys))
+    return dict(zip(keys, results))
 
 
 # ── Derived-series helpers ────────────────────────────────────────────────────
@@ -341,38 +362,60 @@ INTL = {
 # ── US builder (full indicator set) ─────────────────────────────────────────
 def _build_us():
     """Return (gauge_tiles, [chart cards]) for the United States."""
+    f = _fetch_fred_many([
+        # Rates
+        ("FEDFUNDS", 120), ("DGS2", 2600), ("DGS10", 2600), ("DGS30", 2600),
+        ("T10Y2Y", 2600), ("T10Y3M", 2600), ("T5YIFR", 2600),
+        # Inflation
+        ("CPIAUCSL", 240), ("PCEPILFE", 240), ("T10YIE", 2600),
+        # Credit
+        ("BAMLC0A0CM", 2600), ("BAMLH0A0HYM2", 2600),
+        ("NFCI", 520),       # financial conditions, weekly
+        # Labour
+        ("UNRATE", 240), ("PAYEMS", 240), ("ICSA", 500), ("JTSJOL", 240),
+        # Growth
+        ("GDPC1", 120), ("INDPRO", 240), ("USSLIND", 240),
+        # Housing & consumer
+        ("HOUST", 240),      # housing starts, thousands
+        ("RSAFS", 240),      # retail sales, $M
+        ("UMCSENT", 240),    # consumer sentiment
+        # FX & Liquidity
+        ("DTWEXBGS", 2600), ("M2SL", 240),
+    ])
+    def _f(sid, limit):
+        return f.get((sid, limit), [])
     # Rates
-    fedfunds  = _fetch_fred("FEDFUNDS",     120)
-    dgs2      = _fetch_fred("DGS2",         2600)
-    dgs10     = _fetch_fred("DGS10",        2600)
-    dgs30     = _fetch_fred("DGS30",        2600)
-    t10y2y    = _fetch_fred("T10Y2Y",       2600)
-    t10y3m    = _fetch_fred("T10Y3M",       2600)
-    t5yifr    = _fetch_fred("T5YIFR",       2600)
+    fedfunds  = _f("FEDFUNDS",     120)
+    dgs2      = _f("DGS2",         2600)
+    dgs10     = _f("DGS10",        2600)
+    dgs30     = _f("DGS30",        2600)
+    t10y2y    = _f("T10Y2Y",       2600)
+    t10y3m    = _f("T10Y3M",       2600)
+    t5yifr    = _f("T5YIFR",       2600)
     # Inflation
-    cpi       = _fetch_fred("CPIAUCSL",     240)
-    pce       = _fetch_fred("PCEPILFE",     240)
-    t10yie    = _fetch_fred("T10YIE",       2600)
+    cpi       = _f("CPIAUCSL",     240)
+    pce       = _f("PCEPILFE",     240)
+    t10yie    = _f("T10YIE",       2600)
     # Credit
-    ig_oas    = _fetch_fred("BAMLC0A0CM",   2600)
-    hy_oas    = _fetch_fred("BAMLH0A0HYM2", 2600)
-    nfci      = _fetch_fred("NFCI",         520)     # financial conditions, weekly
+    ig_oas    = _f("BAMLC0A0CM",   2600)
+    hy_oas    = _f("BAMLH0A0HYM2", 2600)
+    nfci      = _f("NFCI",         520)
     # Labour
-    unrate    = _fetch_fred("UNRATE",       240)
-    payems    = _fetch_fred("PAYEMS",       240)
-    icsa      = _fetch_fred("ICSA",         500)
-    jtsjol    = _fetch_fred("JTSJOL",       240)
+    unrate    = _f("UNRATE",       240)
+    payems    = _f("PAYEMS",       240)
+    icsa      = _f("ICSA",         500)
+    jtsjol    = _f("JTSJOL",       240)
     # Growth
-    gdpc1     = _fetch_fred("GDPC1",        120)
-    indpro    = _fetch_fred("INDPRO",       240)
-    usslind   = _fetch_fred("USSLIND",      240)
+    gdpc1     = _f("GDPC1",        120)
+    indpro    = _f("INDPRO",       240)
+    usslind   = _f("USSLIND",      240)
     # Housing & consumer
-    houst     = _fetch_fred("HOUST",        240)     # housing starts, thousands
-    rsafs     = _fetch_fred("RSAFS",        240)     # retail sales, $M
-    umcsent   = _fetch_fred("UMCSENT",      240)     # consumer sentiment
+    houst     = _f("HOUST",        240)
+    rsafs     = _f("RSAFS",        240)
+    umcsent   = _f("UMCSENT",      240)
     # FX & Liquidity
-    dtwexbgs  = _fetch_fred("DTWEXBGS",     2600)
-    m2sl      = _fetch_fred("M2SL",         240)
+    dtwexbgs  = _f("DTWEXBGS",     2600)
+    m2sl      = _f("M2SL",         240)
 
     # Derived series
     cpi_yoy    = _yoy(cpi)
@@ -563,9 +606,13 @@ def _build_country(code: str):
     """Return (gauge_tiles, [chart cards]) for a non-US country from `INTL`."""
     cfg = INTL[code]
 
+    _limits = {"policy": 200, "short3m": 200, "y10": 200, "unrate": 240,
+               "fx": 2600, "gdp_q": 60, "cpi_m": 240, "cpi_q": 80, "cli": 240}
+    f = _fetch_fred_many([(cfg.get(c), lim) for c, lim in _limits.items()])
+
     def _get(concept, limit):
         sid = cfg.get(concept)
-        return _fetch_fred(sid, limit) if sid else []
+        return f.get((sid, limit), []) if sid else []
 
     policy  = _get("policy",  200)
     short3m = _get("short3m", 200)
@@ -701,19 +748,27 @@ def _core_series(code: str) -> dict:
     carry the series for that country.
     """
     if code == "US":
+        f = _fetch_fred_many([
+            ("FEDFUNDS", 200), ("GS10", 200), ("CPIAUCSL", 240),
+            ("GDPC1", 120), ("UNRATE", 240), ("USALOLITOAASTSAM", 240),
+        ])
         return dict(
-            policy=_fetch_fred("FEDFUNDS", 200),
-            y10   =_fetch_fred("GS10",     200),           # monthly 10Y (matches others)
-            cpi   =_yoy(_fetch_fred("CPIAUCSL", 240)),
-            gdp   =_yoy_q(_fetch_fred("GDPC1", 120)),
-            unrate=_fetch_fred("UNRATE",   240),
-            cli   =_fetch_fred("USALOLITOAASTSAM", 240),
+            policy=f[("FEDFUNDS", 200)],
+            y10   =f[("GS10",     200)],           # monthly 10Y (matches others)
+            cpi   =_yoy(f[("CPIAUCSL", 240)]),
+            gdp   =_yoy_q(f[("GDPC1", 120)]),
+            unrate=f[("UNRATE",   240)],
+            cli   =f[("USALOLITOAASTSAM", 240)],
         )
     cfg = INTL[code]
 
+    _limits = {"policy": 200, "y10": 200, "cpi_m": 240, "cpi_q": 80,
+               "gdp_q": 60, "unrate": 240, "cli": 240}
+    f = _fetch_fred_many([(cfg.get(c), lim) for c, lim in _limits.items()])
+
     def _g(concept, limit):
         sid = cfg.get(concept)
-        return _fetch_fred(sid, limit) if sid else []
+        return f.get((sid, limit), []) if sid else []
 
     if cfg.get("cpi_m"):
         cpi = _yoy(_g("cpi_m", 240))
@@ -739,7 +794,10 @@ def _build_world():
     covers, and each indicator gets one comparison chart overlaying all
     countries so divergences (rate cuts, inflation, growth) read at a glance.
     """
-    data = {c: _core_series(c) for c in _WORLD_CODES}
+    # Each country's series fetch in parallel internally; fetch the countries
+    # themselves in parallel too so the whole board loads in ~1 round-trip.
+    with ThreadPoolExecutor(max_workers=len(_WORLD_CODES)) as pool:
+        data = dict(zip(_WORLD_CODES, pool.map(_core_series, _WORLD_CODES)))
 
     def _latest(c, key):
         s = data[c].get(key) or []
@@ -888,8 +946,14 @@ def _highlight_country(country):
     Output("macro-charts", "children"),
     Input("macro-refresh",        "n_intervals"),
     Input("macro-country-store",  "data"),
+    Input("page-store",           "data"),
 )
-def refresh_macro(_n, country):
+def refresh_macro(_n, country, page):
+    # Every FRED fetch (and the worker pool behind it) starts here. The macro
+    # page stays mounted while hidden, so without this gate the hourly interval
+    # would tie up a Dash worker rebuilding charts nobody is looking at.
+    if page != "nav-macro":
+        return no_update, no_update
     country = country if country in _COUNTRY_CODES else "WORLD"
 
     key = _fred_key()
