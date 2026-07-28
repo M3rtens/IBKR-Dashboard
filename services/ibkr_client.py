@@ -19,6 +19,7 @@ import os
 import threading
 import time
 import logging
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -27,6 +28,15 @@ from ib_insync import IB, Contract, util
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _future_result(future, timeout: float):
+    """Wait for a worker-loop future and cancel it if the caller times out."""
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeoutError:
+        future.cancel()
+        raise
 
 # Set IBKR_DEBUG=1 to see per-request historical-data tracing (which contract
 # is fetched, how long it took, how many bars came back).
@@ -331,7 +341,13 @@ class IBKRClient:
             sum_realized   += realized_pnl
 
             # Percentage P&L
-            cost_basis = abs(avg_cost * position) if position != 0 else 0
+            multiplier = 1.0
+            if sec_type in {"OPT", "FOP", "FUT", "SSF"}:
+                try:
+                    multiplier = float(contract.multiplier or 1.0)
+                except (TypeError, ValueError):
+                    multiplier = 1.0
+            cost_basis = abs(avg_cost * position * multiplier) if position != 0 else 0
             pnl_pct    = (unrealized_pnl / cost_basis * 100) if cost_basis else 0.0
 
             day_chg = self._daily_changes.get(symbol, (0.0, 0.0))
@@ -422,7 +438,9 @@ class IBKRClient:
             future = asyncio.run_coroutine_threadsafe(
                 self._build_hist_series(), self._loop
             )
-            df = future.result(timeout=120)
+            n_positions = len(self.cached_snapshot.holdings)
+            timeout = max(120.0, n_positions * self._hist_req_timeout + 30.0)
+            df = _future_result(future, timeout)
             if df is not None and not df.empty:
                 with self._lock:
                     self._hist_df = df
@@ -620,7 +638,7 @@ class IBKRClient:
                         curr_close = bars[-1].close
                         if prev_close and prev_close > 0:
                             pct    = (curr_close - prev_close) / prev_close * 100
-                            dollar = abs(mv) * pct / 100
+                            dollar = mv * pct / 100
                             changes[sym] = (round(dollar, 2), round(pct, 2))
                     await asyncio.sleep(0.15)
                 except Exception as exc:
@@ -659,7 +677,9 @@ class IBKRClient:
             future = asyncio.run_coroutine_threadsafe(
                 self._fetch_sparklines_async(), self._loop
             )
-            future.result(timeout=120)
+            n_positions = len(self.cached_snapshot.holdings)
+            timeout = max(120.0, n_positions * self._hist_req_timeout + 30.0)
+            _future_result(future, timeout)
         except Exception as exc:
             logger.error("Sparkline fetch failed: %s", exc)
         finally:
@@ -740,7 +760,9 @@ class IBKRClient:
             future = asyncio.run_coroutine_threadsafe(
                 self._build_bench_series(), self._loop
             )
-            df = future.result(timeout=120)
+            timeout = max(
+                120.0, len(self._BENCH_CONTRACTS) * self._hist_req_timeout + 30.0)
+            df = _future_result(future, timeout)
             if df is not None and not df.empty:
                 with self._lock:
                     self._bench_df = df
@@ -858,7 +880,9 @@ class IBKRClient:
             future = asyncio.run_coroutine_threadsafe(
                 self._build_country_perf(), self._loop
             )
-            result = future.result(timeout=120)
+            timeout = max(
+                120.0, len(self._COUNTRY_ETFS) * self._hist_req_timeout + 30.0)
+            result = _future_result(future, timeout)
             if result:
                 with self._lock:
                     self._country_perf_cache = result
@@ -891,8 +915,6 @@ class IBKRClient:
                     await asyncio.sleep(0.15)
                     continue
                 change_pct = (close / prev_close - 1.0) * 100
-                # Clamp extreme values for color mapping
-                change_pct = max(-10, min(10, change_pct))
                 results.append({
                     "code": code,
                     "country": name,
@@ -939,7 +961,7 @@ class IBKRClient:
             future = asyncio.run_coroutine_threadsafe(
                 self._lookup_async(symbol), self._loop
             )
-            result = future.result(timeout=30)
+            result = _future_result(future, 30)
             if result:
                 with self._lock:
                     self._sec_cache[symbol] = result
@@ -1006,7 +1028,8 @@ class IBKRClient:
             future = asyncio.run_coroutine_threadsafe(
                 self._detail_async(symbol), self._loop
             )
-            result = future.result(timeout=60)
+            timeout = max(60.0, 3 * self._hist_req_timeout + 30.0)
+            result = _future_result(future, timeout)
             if result:
                 with self._lock:
                     self._sec_detail_cache[symbol] = result
@@ -1101,7 +1124,7 @@ class IBKRClient:
                 "changePct": ((last["close"] - prev["close"]) / prev["close"] * 100
                               if prev["close"] != 0 else 0),
                 "yearHigh": max(highs) if highs else 0,
-                "yearLow": min(l for l in lows if l > 0) if lows else 0,
+                "yearLow": min((l for l in lows if l > 0), default=0),
                 "wap": last["wap"],
                 "barCount": last["barCount"],
             }

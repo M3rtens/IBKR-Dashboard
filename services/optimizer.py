@@ -14,6 +14,22 @@ import pandas as pd
 from scipy.optimize import minimize
 
 
+class OptimizationError(RuntimeError):
+    """Raised when a numerical optimizer cannot produce valid weights."""
+
+
+def _result_weights(result, tickers: list[str]) -> dict:
+    if not result.success:
+        raise OptimizationError(
+            f"Optimization failed: {getattr(result, 'message', 'unknown solver error')}")
+    weights = np.maximum(np.asarray(result.x, dtype=float), 0)
+    total = float(weights.sum())
+    if not np.all(np.isfinite(weights)) or total <= 0:
+        raise OptimizationError("Optimization returned invalid weights")
+    weights /= total
+    return {t: round(float(w), 6) for t, w in zip(tickers, weights)}
+
+
 def mean_variance(returns_df: pd.DataFrame, target_return: float = None,
                   risk_aversion: float = 1.0, **kw) -> dict:
     """Classic Markowitz mean-variance optimization."""
@@ -41,18 +57,22 @@ def mean_variance(returns_df: pd.DataFrame, target_return: float = None,
         result = minimize(_neg_utility, x0=np.ones(n) / n, method="SLSQP",
                           bounds=bounds, constraints=constraints)
 
-    if result.success:
-        weights = np.maximum(result.x, 0)
-        weights = weights / weights.sum()
-    else:
-        weights = np.ones(n) / n
-
-    return {t: round(float(w), 6) for t, w in zip(tickers, weights)}
+    return _result_weights(result, tickers)
 
 
 def min_variance(returns_df: pd.DataFrame, **kw) -> dict:
     """Global minimum variance portfolio."""
-    return mean_variance(returns_df, target_return=None, risk_aversion=100.0, **kw)
+    tickers = list(returns_df.columns)
+    n = len(tickers)
+    cov = returns_df.cov().values * 252
+    result = minimize(
+        lambda w: w @ cov @ w,
+        x0=np.ones(n) / n,
+        method="SLSQP",
+        bounds=[(0, 1)] * n,
+        constraints=[{"type": "eq", "fun": lambda w: np.sum(w) - 1}],
+    )
+    return _result_weights(result, tickers)
 
 
 def max_sharpe(returns_df: pd.DataFrame, risk_free_rate: float = 0.04, **kw) -> dict:
@@ -75,13 +95,7 @@ def max_sharpe(returns_df: pd.DataFrame, risk_free_rate: float = 0.04, **kw) -> 
     result = minimize(_neg_sharpe, x0=np.ones(n) / n, method="SLSQP",
                       bounds=bounds, constraints=constraints)
 
-    if result.success:
-        weights = np.maximum(result.x, 0)
-        weights = weights / weights.sum()
-    else:
-        weights = np.ones(n) / n
-
-    return {t: round(float(w), 6) for t, w in zip(tickers, weights)}
+    return _result_weights(result, tickers)
 
 
 def risk_parity(returns_df: pd.DataFrame, **kw) -> dict:
@@ -104,13 +118,7 @@ def risk_parity(returns_df: pd.DataFrame, **kw) -> dict:
     result = minimize(_risk_budget_obj, x0=np.ones(n) / n, method="SLSQP",
                       bounds=bounds, constraints=constraints)
 
-    if result.success:
-        weights = np.maximum(result.x, 0)
-        weights = weights / weights.sum()
-    else:
-        weights = np.ones(n) / n
-
-    return {t: round(float(w), 6) for t, w in zip(tickers, weights)}
+    return _result_weights(result, tickers)
 
 
 def hierarchical_risk_parity(returns_df: pd.DataFrame, **kw) -> dict:
@@ -168,7 +176,11 @@ def hierarchical_risk_parity(returns_df: pd.DataFrame, **kw) -> dict:
     def _cluster_var(items):
         idx = [tickers.index(t) for t in items]
         sub_cov = cov[np.ix_(idx, idx)]
-        w = np.ones(len(idx)) / len(idx)
+        diag = np.diag(sub_cov)
+        inv_diag = np.divide(
+            1.0, diag, out=np.zeros_like(diag, dtype=float), where=diag > 1e-16)
+        total = inv_diag.sum()
+        w = inv_diag / total if total > 0 else np.ones(len(idx)) / len(idx)
         return float(w @ sub_cov @ w)
 
     sorted_tickers = [tickers[i] for i in sorted_idx]

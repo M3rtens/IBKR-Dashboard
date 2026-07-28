@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from dash import dcc, html
 
 from dashboard.theme import (ACCENT, RED, T1, T2, T3, T4, T5,
-                             ALLOC_HEX, _RANGES, _BENCH)
+                             ALLOC_HEX, _RANGES, _BENCH, DEMO_MODE)
 from dashboard.formatters import money
 from dashboard.icons import _svg_b64
 from dashboard.data import _bench_series
@@ -98,13 +98,20 @@ def build_main_chart(port_series, range_key="1Y", active_bench=("asx",), port_da
     if not time_basis and cash_flows is not None:
         import datetime as _dt
         try:
-            if hasattr(cash_flows, "empty") and not cash_flows.empty and "datetime" in cash_flows.columns and "amount" in cash_flows.columns:
+            amount_col = ("base_amount" if hasattr(cash_flows, "columns")
+                          and "base_amount" in cash_flows.columns else "amount")
+            if (hasattr(cash_flows, "empty") and not cash_flows.empty
+                    and "datetime" in cash_flows.columns
+                    and amount_col in cash_flows.columns):
                 for _, row in cash_flows.iterrows():
                     dt = row.get("datetime")
                     if pd.isna(dt):
                         continue
                     flow_date = dt.date() if hasattr(dt, "date") else _dt.date.fromisoformat(str(dt)[:10])
-                    mw_flows[flow_date] = mw_flows.get(flow_date, 0.0) + float(row.get("amount") or 0.0)
+                    amount = row.get(amount_col)
+                    if pd.isna(amount):
+                        continue
+                    mw_flows[flow_date] = mw_flows.get(flow_date, 0.0) + float(amount)
         except Exception:
             mw_flows = {}
 
@@ -176,9 +183,11 @@ def build_main_chart(port_series, range_key="1Y", active_bench=("asx",), port_da
             if aligned and aligned[0]:
                 raw_bench = aligned
 
-        if raw_bench is None:
+        if raw_bench is None and DEMO_MODE:
             synthetic = _bench_series(bm["seed"], bm["drift"], bm["vol"], bm["shock"])
-            raw_bench = synthetic[start:]
+            raw_bench = synthetic[-n:]
+        if raw_bench is None:
+            continue
 
         # Time-weighted: show benchmark P&L scaled to portfolio starting value.
         # Money-weighted with cash flows: simulate same deposits/withdrawals into benchmark.
@@ -238,6 +247,7 @@ def build_main_chart(port_series, range_key="1Y", active_bench=("asx",), port_da
     return fig
 
 def build_donut(allocation, total):
+    allocation = [a for a in allocation if a.get("value", 0) > 0]
     names  = [a["name"]  for a in allocation]
     values = [a["value"] for a in allocation]
     colors = [ALLOC_HEX.get(n,"#888") for n in names]

@@ -22,7 +22,7 @@ from dashboard.icons import (_icon, _icon_src,
                              _ICO_DOC, _ICO_SEARCH, _ICO_SLIDERS,
                              _ICO_TARGET, _ICO_GLOBE,
                              _ICO_CHEVRON_LEFT, _ICO_CHEVRON_RIGHT)
-from dashboard.formatters import money, pct_fmt, pnl_c
+from dashboard.formatters import money, pct_fmt, pnl_c, price_money
 from dashboard.charts import build_main_chart, build_donut, spark, _build_world_map
 from dashboard.data import (get_data, get_portfolio_metrics, get_portfolio_risk_metrics,
                             _div_cache, _fetch_news, _get_country_perf)
@@ -374,6 +374,19 @@ def navigate(*args):
 
 
 @app.callback(
+    Output("sec-detail-store", "data", allow_duplicate=True),
+    Input("page-store", "data"),
+    State("sec-detail-store", "data"),
+    prevent_initial_call=True,
+)
+def _clear_security_navigation(page, selected):
+    """Make selecting the same ticker navigate again after leaving its page."""
+    if page != "security" and selected:
+        return None
+    return no_update
+
+
+@app.callback(
     Output("sidebar-el","style"),
     Output("sidebar-toggle-btn","children"),
     Input("sidebar-toggle-btn","n_clicks"),
@@ -644,7 +657,7 @@ def refresh(_, range_key, active_bench, sort_state, chart_mode, return_basis, mo
     if loading:
         rlabel = "loading..."
     elif range_key == "ALL":
-        _yrs = round(avail / 260)
+        _yrs = round(n / 260)
         rlabel = f"{_yrs} year{'s' if _yrs != 1 else ''}" if _yrs >= 1 else "available history"
     else:
         rlabel = _rlabels.get(range_key, "year")
@@ -770,51 +783,53 @@ def refresh(_, range_key, active_bench, sort_state, chart_mode, return_basis, mo
         import datetime as _dt
         tmp = divs_data.copy()
         tmp["month"] = pd.to_datetime(tmp["datetime"], errors="coerce").dt.to_period("M")
-        monthly = tmp.groupby("month")["amount"].sum().sort_index()
+        amount_col = "base_amount" if "base_amount" in tmp.columns else "amount"
+        monthly = tmp.groupby("month")[amount_col].sum().sort_index()
         bar_vals = monthly.tolist()[-8:] if len(monthly) > 8 else monthly.tolist()
         bar_labels = [p.strftime("%b") for p in monthly.index[-8:]] if len(monthly) > 8 else [p.strftime("%b") for p in monthly.index]
     else:
         bar_labels = []
         bar_vals = []
-    mx = max(bar_vals) if bar_vals else 1
+    mx = max([v for v in bar_vals if v > 0], default=1)
     income_bars = [
         html.Div([
+            html.Div(f"{l} · {price_money(v)}", className="bar-tip-text"),
             html.Div(style=dict(width="100%",borderRadius="4px 4px 2px 2px",
                 background=ACCENT if i==len(bar_vals)-1 else "rgba(255,255,255,0.14)",
-                height=f"{v/mx*100:.0f}%")),
+                 height=f"{max(v, 0)/mx*100:.0f}%")),
             html.Div(l,style=dict(fontSize="10px",color=T5)),
-        ], style=dict(flex="1",display="flex",flexDirection="column",
+        ], className="bar-tip",
+           style=dict(flex="1",display="flex",flexDirection="column",
                       alignItems="center",gap="6px",height="100%",justifyContent="flex-end"))
         for i,(l,v) in enumerate(zip(bar_labels,bar_vals))
     ]
 
-    # -- dividends
+    # -- dividends (most recent payments — the Flex feed is historical, so there
+    # is no forward calendar; show the latest received dividends instead)
     divs_data = _div_cache.get("data")
     if divs_data is not None and not divs_data.empty and "symbol" in divs_data.columns:
-        import datetime as _dt
-        now = _dt.datetime.now()
         dt_col = "datetime" if "datetime" in divs_data.columns else "date"
-        upcoming = divs_data.copy()
-        upcoming["_dt"] = pd.to_datetime(upcoming[dt_col], errors="coerce")
-        upcoming = upcoming[upcoming["_dt"] >= now].sort_values("_dt")
-        if not upcoming.empty and "amount" in upcoming.columns:
-            # Aggregate by symbol + settle date to deduplicate
-            date_col = "settleDate" if "settleDate" in upcoming.columns else dt_col
-            upcoming["_date_key"] = pd.to_datetime(upcoming[date_col], errors="coerce").dt.date
-            agg = upcoming.groupby(["symbol", "_date_key"]).agg(
-                total_amount=("amount", "sum"),
-                pay_date=("_dt", "min"),
-            ).reset_index().sort_values("pay_date").head(8)
+        recent = divs_data.copy()
+        recent["_dt"] = pd.to_datetime(recent[dt_col], errors="coerce")
+        recent = recent.dropna(subset=["_dt"])
+        amount_col = "base_amount" if "base_amount" in recent.columns else "amount"
+        if not recent.empty and amount_col in recent.columns:
+            # Aggregate by symbol + settle date so a dividend and its matching
+            # withholding-tax line net into a single row.
+            date_col = "settleDate" if "settleDate" in recent.columns else dt_col
+            recent["_date_key"] = pd.to_datetime(recent[date_col], errors="coerce").dt.date
+            agg = recent.groupby(["symbol", "_date_key"]).agg(
+                total_amount=(amount_col, "sum"),
+                pay_date=("_dt", "max"),
+            ).reset_index()
+            agg = agg[agg["total_amount"] > 0].sort_values("pay_date", ascending=False).head(8)
             divs = []
             for _, row in agg.iterrows():
                 sym = str(row["symbol"])
                 amt = float(row["total_amount"])
                 pay_dt = row["pay_date"]
-                if hasattr(pay_dt, "strftime"):
-                    note = pay_dt.strftime("Ex-div %d %b") if pay_dt.date() > now.date() else pay_dt.strftime("Pays %d %b")
-                else:
-                    note = str(pay_dt)[:16]
-                divs.append((sym, note, money(amt)))
+                note = pay_dt.strftime("Paid %d %b") if hasattr(pay_dt, "strftime") else str(pay_dt)[:16]
+                divs.append((sym, note, price_money(amt)))
         else:
             divs = []
     else:

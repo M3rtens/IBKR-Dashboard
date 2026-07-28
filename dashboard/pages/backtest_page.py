@@ -22,7 +22,8 @@ import plotly.graph_objects as go
 from dash import dcc, html, Input, Output, State, ALL, ctx, no_update
 
 from dashboard.app_instance import app
-from dashboard.theme import BG_CARD, BORDER, ACCENT, RED, T1, T2, T3, T4, T5
+from dashboard.theme import (BG_CARD, BORDER, ACCENT, RED, T1, T2, T3, T4,
+                             T5, DEMO_MODE)
 
 # Backtest uses a blue accent to distinguish it from the green pages.
 BLUE = "#4aa8ff"
@@ -224,8 +225,8 @@ def _monthly_returns(holdings, period=DEFAULT_PERIOD, bench_keys=None):
 
     Fetches each holding's yfinance monthly closes (cached in market_data),
     aligns them on a shared month index and computes returns. CASH is a flat
-    accrual; anything that can't be fetched gets a deterministic modelled
-    series so the simulation always runs. Returns ``(months, rets, benches)``
+    accrual. Demo mode can use deterministic modelled data; live mode raises a
+    visible error rather than presenting fabricated returns. Returns ``(months, rets, benches)``
     where ``benches`` is ``{bench_key: [monthly return, ...]}``.
     """
     from services import market_data
@@ -237,11 +238,14 @@ def _monthly_returns(holdings, period=DEFAULT_PERIOD, bench_keys=None):
           f"{[(h['key'], h.get('yf')) for h in holdings]}, benchmarks={bench_keys}",
           flush=True)
     frames = {}
+    missing_holdings = []
     for h in holdings:
         yf = h.get("yf")
         if h["key"] == "CASH" or not yf:
             print(f"[BT]   holding {h['key']}: skipped "
                   f"({'cash' if h['key'] == 'CASH' else 'no yf ticker'})", flush=True)
+            if h["key"] != "CASH":
+                missing_holdings.append(h["key"])
             continue
         try:
             df = market_data._history(yf, fetch, "1mo")
@@ -258,17 +262,21 @@ def _monthly_returns(holdings, period=DEFAULT_PERIOD, bench_keys=None):
                 print(f"[BT]   holding {h['key']} ({yf}): {len(s)} monthly closes", flush=True)
             else:
                 print(f"[BT]   holding {h['key']} ({yf}): only {len(s)} closes "
-                      f"— using modelled fallback", flush=True)
+                      f"— unavailable", flush=True)
+                missing_holdings.append(h["key"])
         else:
             print(f"[BT]   holding {h['key']} ({yf}): no data ({rows} rows) "
-                  f"— using modelled fallback", flush=True)
-    if not frames:
-        print("[BT] no holdings fetched from yfinance — FULL synthetic fallback",
-              flush=True)
+                  f"— unavailable", flush=True)
+            missing_holdings.append(h["key"])
+    if missing_holdings and not DEMO_MODE:
+        raise RuntimeError(
+            "No market history is available for: " + ", ".join(missing_holdings))
+    if not frames and DEMO_MODE:
         return _synthetic_for(holdings, n_months or 120, bench_keys)
 
     # Fetch each selected benchmark; align it in the same frame as the holdings.
     bench_cols = {}
+    missing_benchmarks = []
     for bk in bench_keys:
         byf = BENCH_OPTS[bk]["yf"]
         try:
@@ -284,10 +292,16 @@ def _monthly_returns(holdings, period=DEFAULT_PERIOD, bench_keys=None):
                 print(f"[BT]   benchmark {bk} ({byf}): {len(s)} monthly closes", flush=True)
             else:
                 print(f"[BT]   benchmark {bk} ({byf}): only {len(s)} closes "
-                      f"— using modelled fallback", flush=True)
+                      f"— unavailable", flush=True)
+                missing_benchmarks.append(bk)
         else:
-            print(f"[BT]   benchmark {bk} ({byf}): no data — using modelled fallback",
+            print(f"[BT]   benchmark {bk} ({byf}): no data — unavailable",
                   flush=True)
+            missing_benchmarks.append(bk)
+    if missing_benchmarks and not DEMO_MODE:
+        raise RuntimeError(
+            "No benchmark history is available for: "
+            + ", ".join(BENCH_OPTS[k]["label"] for k in missing_benchmarks))
 
     allframes = dict(frames)
     for bk, s in bench_cols.items():
@@ -307,13 +321,15 @@ def _monthly_returns(holdings, period=DEFAULT_PERIOD, bench_keys=None):
             rets[k] = [float(v) for v in r[k].values]
         elif k == "CASH":
             rets[k] = [0.0034] * n
-        else:
+        elif DEMO_MODE:
             rets[k] = _fallback_series(k, n)
     benches = {}
     for bk in bench_keys:
         col = f"__B_{bk}__"
-        benches[bk] = ([float(v) for v in r[col].values] if col in r.columns
-                       else _fallback_series(f"__BENCH_{bk}__", n))
+        if col in r.columns:
+            benches[bk] = [float(v) for v in r[col].values]
+        elif DEMO_MODE:
+            benches[bk] = _fallback_series(f"__BENCH_{bk}__", n)
     return months, rets, benches
 
 
@@ -338,8 +354,7 @@ def _load_my_portfolio():
 
     Weights are current market-value weights normalised to a 100% total;
     tickers map to yfinance symbols (catalog match first, else via
-    currency/exchange). Falls back to a representative sample if no live
-    holdings are available (e.g. demo mode).
+    currency/exchange). Demo mode falls back to a representative sample.
     """
     from dashboard.data import get_data
     from services import market_data
@@ -372,7 +387,7 @@ def _load_my_portfolio():
             out.append({"key": tk, "weight": weight, "name": h.get("name") or tk,
                         "yf": market_data.yf_ticker(tk, cur, exch),
                         "color": PALETTE[i % len(PALETTE)]})
-    if not out:
+    if not out and DEMO_MODE:
         out = [_mk(k, w) for k, w in MY_PORTFOLIO]
     return _normalise_100(out)
 
@@ -977,8 +992,16 @@ def _render_results(_n, state):
     capital = _parse_capital(state.get("capital", 100_000))
     bench_keys = [k for k in state.get("benchmarks", DEFAULT_BENCH)
                   if k in BENCH_OPTS]
-    months, rets, benches = _monthly_returns(
-        holdings, state.get("period", DEFAULT_PERIOD), bench_keys)
+    try:
+        months, rets, benches = _monthly_returns(
+            holdings, state.get("period", DEFAULT_PERIOD), bench_keys)
+    except RuntimeError as exc:
+        return html.Div(
+            [html.Div("Backtest unavailable", style=dict(fontWeight="600")),
+             html.Div(str(exc), style=dict(fontSize="12.5px", color=T3,
+                                          marginTop="6px"))],
+            style=dict(background=BG_CARD, border=f"1px solid {BORDER}",
+                       borderRadius="14px", padding="24px", color=RED))
     eq, prets = _simulate(holdings, capital, state.get("rebalance", "Quarterly"),
                           months, rets)
     ss = _stats(prets, eq)

@@ -100,7 +100,7 @@ def side_rail():
             style=dict(display="flex",alignItems="flex-end",gap="7px",
                        height="64px",margin="16px 0 6px")),
         html.Div([
-            html.Div("Upcoming",style=dict(fontSize="11px",color=T4,
+            html.Div("Recent",style=dict(fontSize="11px",color=T4,
                 fontWeight="600",letterSpacing="0.4px",textTransform="uppercase")),
             html.Div(id="dividend-rows",
                 style=dict(display="flex",flexDirection="column",gap="11px",marginTop="11px")),

@@ -26,6 +26,7 @@ ALLOC_HEX = {
     "Australian Shares": "#4ade80", "International Shares": "#60a5fa",
     "Bonds": "#c084fc", "Property": "#fbbf24", "Cash": "#94a3b8",
     "Securities": "#60a5fa",
+    "Margin debt": "#f87171",
 }
 HOLD_CLR = {
     "Australian Shares": "oklch(0.80 0.13 158)",

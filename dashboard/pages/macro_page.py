@@ -329,12 +329,12 @@ INTL = {
                y10="IRLTLT01JPM156N",
                cpi_m=None, gdp_q="JPNRGDPEXP",
                unrate="LRHUTTTTJPM156S", cli="JPNLOLITOAASTSAM",
-               fx="DEXJPUS", fx_lbl="JPY/USD", fx_dec=2),
+               fx="DEXJPUS", fx_lbl="USD/JPY", fx_dec=2),
     "CN": dict(policy="INTDSRCNM193N", short3m="IR3TIB01CNM156N",
                y10=None,
                cpi_m="CHNCPIALLMINMEI", gdp_q=None,
                unrate=None, cli="CHNLOLITOAASTSAM",
-               fx="DEXCHUS", fx_lbl="CNY/USD", fx_dec=3),
+               fx="DEXCHUS", fx_lbl="USD/CNY", fx_dec=3),
 }
 
 

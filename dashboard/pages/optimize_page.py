@@ -279,7 +279,7 @@ def run_optimization(n, method, rf_pct, lookback):
     import asyncio
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    lookback_days = int(lookback or 90)
+    lookback_days = int(90 if lookback is None else lookback)
 
     def _fetch_one(ticker):
         row = non_cash[non_cash["Symbol"] == ticker].iloc[0]
@@ -294,8 +294,9 @@ def run_optimization(n, method, rf_pct, lookback):
                 whatToShow="TRADES", useRTH=True),
             client._loop)
         bars = future.result(timeout=30)
-        dates = [bar.date for bar in bars]
-        closes = [bar.close for bar in bars if bar.close > 0]
+        valid = [(bar.date, bar.close) for bar in bars if bar.close > 0]
+        dates = [date for date, _ in valid]
+        closes = [close for _, close in valid]
         return ticker, dates, closes
 
     price_data = {}
@@ -326,18 +327,21 @@ def run_optimization(n, method, rf_pct, lookback):
                     style=dict(color=RED,fontSize="13px",padding="8px 0"))
         return insuff, no_update, no_update, no_update, no_update, no_update
 
-    # Build returns DataFrame (columns in tickers order)
-    min_len = min(len(v) for v in price_data.values())
-    # Use dates from the first ticker as the index (all tickers have aligned dates)
-    first_ticker = list(price_data.keys())[0]
-    date_index = pd.DatetimeIndex(date_data[first_ticker][-min_len:])
-    prices_df = pd.DataFrame({t: v[-min_len:] for t, v in price_data.items()}, index=date_index)
-    returns_df = prices_df.pct_change().dropna()
+    # Align on the union of trading dates. This supports mixed-market portfolios
+    # (for example ASX + US) without assigning one ticker's dates to another's
+    # closes. Forward-fill holidays, then keep the shared overlap.
+    price_series = {
+        ticker: pd.Series(values, index=pd.DatetimeIndex(date_data[ticker]),
+                          name=ticker)
+        for ticker, values in price_data.items()
+    }
+    prices_df = pd.concat(price_series.values(), axis=1).sort_index().ffill().dropna()
+    returns_df = prices_df.pct_change(fill_method=None).dropna()
     available_tickers = list(returns_df.columns)
     print(f"[OPT] Returns DF shape: {returns_df.shape}, columns: {available_tickers}")
 
     # Run optimization
-    rf_rate = (rf_pct or 4.0) / 100.0
+    rf_rate = (4.0 if rf_pct is None else rf_pct) / 100.0
     from services.optimizer import METHODS, run_optimization as _run_opt
     try:
         print(f"[OPT] Running optimizer: method={method}, rf_rate={rf_rate}")
@@ -352,6 +356,14 @@ def run_optimization(n, method, rf_pct, lookback):
 
     # Build comparison chart
     common_tickers = sorted(opt_weights.keys())
+    kept_weight = sum(current_weights.get(t, 0.0) for t in common_tickers)
+    if kept_weight <= 0:
+        fail = html.Div("Current weights are unavailable for the priced holdings.",
+                    style=dict(color=RED,fontSize="13px",padding="8px 0"))
+        return fail, no_update, no_update, no_update, no_update, no_update
+    current_weights = {
+        t: current_weights.get(t, 0.0) / kept_weight for t in common_tickers
+    }
     curr_vals = [current_weights.get(t, 0) * 100 for t in common_tickers]
     opt_vals = [opt_weights.get(t, 0) * 100 for t in common_tickers]
     print(f"[OPT] Building chart: common_tickers={common_tickers}")

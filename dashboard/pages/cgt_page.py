@@ -131,9 +131,9 @@ def generate_cgt_report(n, start_date, end_date):
         cost_basis = abs(t["cost"])
         proceeds = t["proceeds"]
         commission = abs(t["commission"])
-        gain_usd = t["realized_pnl"]
+        gain_local = t["realized_pnl"]
         fx = t["fx_rate"] if t["fx_rate"] else 1.0
-        gain_aud = gain_usd * fx
+        gain_aud = gain_local * fx
         rows.append({
             "Date": t["date"].strftime("%d/%m/%Y") if hasattr(t["date"], "strftime") else str(t["date"])[:10],
             "Symbol": t["symbol"],
@@ -143,7 +143,7 @@ def generate_cgt_report(n, start_date, end_date):
             "Cost Basis": round(cost_basis, 4),
             "Proceeds": round(proceeds, 4),
             "Commission": round(commission, 4),
-            "Gain/Loss (USD)": round(gain_usd, 2),
+            "Gain/Loss (Local)": round(gain_local, 2),
             "FX Rate": round(fx, 4),
             "Gain/Loss (AUD)": round(gain_aud, 2),
         })
@@ -151,7 +151,7 @@ def generate_cgt_report(n, start_date, end_date):
     total_gain = df["Gain/Loss (AUD)"].sum()
     total_gains = df.loc[df["Gain/Loss (AUD)"] > 0, "Gain/Loss (AUD)"].sum()
     total_losses = df.loc[df["Gain/Loss (AUD)"] < 0, "Gain/Loss (AUD)"].sum()
-    # Commission is stored per-row in USD; convert with each row's FX rate so the
+    # Commission is stored per-row in the trade currency; convert with each row's FX rate so the
     # total is in AUD, matching the gain/loss tiles beside it.
     total_commission = float((df["Commission"] * df["FX Rate"]).sum())
     def _sum_cell(label, val, color=T1, display=None):
@@ -190,7 +190,7 @@ def generate_cgt_report(n, start_date, end_date):
         html.Div("Cost Basis", style=dict(**col_style,**hdr_s)),
         html.Div("Proceeds", style=dict(**col_style,**hdr_s)),
         html.Div("Comm.", style=dict(**col_style,**hdr_s)),
-        html.Div("Gain/Loss USD", style=dict(**col_style,**hdr_s)),
+        html.Div("Gain/Loss Local", style=dict(**col_style,**hdr_s)),
         html.Div("FX Rate", style=dict(**col_style,**hdr_s)),
         html.Div("Gain/Loss AUD", style=dict(**col_style,**hdr_s)),
     ], style=dict(display="grid",
@@ -209,8 +209,8 @@ def generate_cgt_report(n, start_date, end_date):
             html.Div(f'{r["Cost Basis"]:.2f}', style={**col_style,"fontSize":"12px"}),
             html.Div(f'{r["Proceeds"]:.2f}', style={**col_style,"fontSize":"12px"}),
             html.Div(f'{r["Commission"]:.2f}', style={**col_style,"fontSize":"12px"}),
-            html.Div(money(r["Gain/Loss (USD)"], signed=True),
-                style={**col_style,"fontSize":"12px","color":(ACCENT if r["Gain/Loss (USD)"]>=0 else RED)}),
+            html.Div(money(r["Gain/Loss (Local)"], signed=True),
+                style={**col_style,"fontSize":"12px","color":(ACCENT if r["Gain/Loss (Local)"]>=0 else RED)}),
             html.Div(f'{r["FX Rate"]:.4f}', style={**col_style,"fontSize":"12px"}),
             html.Div(money(r["Gain/Loss (AUD)"], signed=True),
                 style={**col_style,"fontSize":"12px","fontWeight":"600","color":gl_color}),

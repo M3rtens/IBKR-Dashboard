@@ -20,6 +20,7 @@ Flex Query API flow:
 """
 
 import os
+import tempfile
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
@@ -32,10 +33,40 @@ if os.path.exists(".env"):
             _line = _line.strip()
             if _line and not _line.startswith("#") and "=" in _line:
                 _k, _v = _line.split("=", 1)
-                os.environ[_k.strip()] = _v.strip()
+                os.environ.setdefault(_k.strip(), _v.strip())
 
 import pandas as pd
 import requests
+import threading
+
+
+# ---------------------------------------------------------------------------
+# Fetch coordination
+#
+# IBKR's Flex Web Service rejects overlapping report requests on the same
+# token, and enough failed attempts trip a "1025 Too many failed attempts"
+# lockout. The dashboard has several independent callers (history thread,
+# CGT page), so all live fetches are serialised through one lock, failures
+# impose a cooldown, and a stale cache is served instead of hammering the API.
+# ---------------------------------------------------------------------------
+_FETCH_LOCK = threading.Lock()
+_COOLDOWN_UNTIL = 0.0            # epoch seconds; no live fetch before this
+_LOCKOUT_COOLDOWN_SECONDS = 2 * 3600   # after a 1025 lockout
+_FAILURE_COOLDOWN_SECONDS = 15 * 60    # after any other fetch failure
+
+
+def _set_cooldown(seconds: float) -> None:
+    global _COOLDOWN_UNTIL
+    _COOLDOWN_UNTIL = max(_COOLDOWN_UNTIL, time.time() + seconds)
+
+
+def _safe_exception_summary(exc: Exception, *secrets: str) -> str:
+    """Return a concise diagnostic without leaking Flex credentials."""
+    detail = " ".join(str(exc).split()) or "no error message"
+    for secret in secrets:
+        if secret:
+            detail = detail.replace(str(secret), "<redacted>")
+    return detail[:500]
 
 
 # ---------------------------------------------------------------------------
@@ -86,16 +117,20 @@ class FlexQueryClient:
         resp.raise_for_status()
         root = ET.fromstring(resp.text)
 
-        status = root.findtext("Status", "")
-        if status == "Fail":
-            code = root.findtext("ErrorCode", "")
-            msg = root.findtext("ErrorMessage", "Unknown error")
-            raise RuntimeError(f"Flex SendRequest failed [{code}]: {msg}")
-
         ref_code = root.findtext("ReferenceCode")
-        if not ref_code:
-            raise RuntimeError(f"No ReferenceCode in response:\n{resp.text[:500]}")
-        return ref_code
+        if ref_code:
+            return ref_code
+
+        # No reference code → IBKR returned an error/warning status instead.
+        status = root.findtext("Status", "")
+        code = root.findtext("ErrorCode", "")
+        msg = root.findtext("ErrorMessage", "Unknown error")
+        if code == "1025":
+            # Lockout: polling it only adds failed attempts and extends it.
+            _set_cooldown(_LOCKOUT_COOLDOWN_SECONDS)
+        if status in ("Fail", "Warn"):
+            raise RuntimeError(f"Flex SendRequest failed [{code}]: {msg}")
+        raise RuntimeError(f"No ReferenceCode in response:\n{resp.text[:500]}")
 
     def _get_statement(self, ref_code: str) -> str:
         """Poll until the statement is ready; returns raw XML string."""
@@ -116,6 +151,10 @@ class FlexQueryClient:
             if status == "Warn":
                 code = root.findtext("ErrorCode", "")
                 msg = root.findtext("ErrorMessage", "")
+                if code == "1025":
+                    # Lockout: polling it only adds failed attempts and extends it.
+                    _set_cooldown(_LOCKOUT_COOLDOWN_SECONDS)
+                    raise RuntimeError(f"Flex GetStatement failed [1025]: {msg}")
                 # Code 1019 = still generating; keep polling
                 if code == "1019" or "try again" in msg.lower():
                     print(f"  Report not ready (attempt {attempt}/{self.config.max_retries}) — retrying in {delay:.0f}s …")
@@ -127,12 +166,8 @@ class FlexQueryClient:
             if status == "Fail":
                 code = root.findtext("ErrorCode", "")
                 msg = root.findtext("ErrorMessage", "Unknown error")
-                # 1025 = too many failed attempts; back off longer
                 if code == "1025":
-                    print(f"  Rate limited (attempt {attempt}/{self.config.max_retries}) — waiting {delay:.0f}s …")
-                    time.sleep(delay)
-                    delay = min(delay * 2, self.config.max_retry_delay)
-                    continue
+                    _set_cooldown(_LOCKOUT_COOLDOWN_SECONDS)
                 raise RuntimeError(f"Flex GetStatement failed [{code}]: {msg}")
 
             # No error status → this is the actual FlexQueryResponse data
@@ -226,6 +261,7 @@ def _parse_cash_transactions(root: ET.Element) -> pd.DataFrame:
             "type":        a.get("type"),   # Dividends | Deposits/Withdrawals | Broker Interest | etc.
             "amount":      _float(a.get("amount")),
             "currency":    a.get("currency"),
+            "fx_rate":     _float(a.get("fxRateToBase")),
         })
     df = pd.DataFrame(rows)
     if not df.empty:
@@ -270,6 +306,7 @@ def _parse_account_info(root: ET.Element) -> dict:
         "to_date":      stmt.get("toDate"),
         "period":       stmt.get("period"),
         "generated_at": stmt.get("whenGenerated"),
+        "base_currency": stmt.get("baseCurrency"),
     }
 
 
@@ -350,10 +387,26 @@ class FlexData:
 
 def parse_flex_xml(xml_text: str) -> FlexData:
     root = ET.fromstring(xml_text)
+    account_info = _parse_account_info(root)
+    cash_transactions = _parse_cash_transactions(root)
+    if not cash_transactions.empty:
+        base_currency = (account_info.get("base_currency") or "").upper()
+        currencies = cash_transactions["currency"].fillna("").str.upper()
+        fx_rates = cash_transactions["fx_rate"].astype(float)
+        if base_currency:
+            usable = (currencies == base_currency) | (fx_rates > 0)
+        else:
+            # Older statements may omit baseCurrency. Unconverted amounts are
+            # only safe when the report contains a single transaction currency.
+            usable = ((fx_rates > 0) | (currencies.nunique() <= 1))
+        cash_transactions["base_amount"] = (
+            cash_transactions["amount"]
+            * fx_rates.where(fx_rates > 0, 1.0)
+        ).where(usable)
     return FlexData(
-        account_info=_parse_account_info(root),
+        account_info=account_info,
         trades=_parse_trades(root),
-        cash_transactions=_parse_cash_transactions(root),
+        cash_transactions=cash_transactions,
         open_positions=_parse_open_positions(root),
         equity_summary=_parse_equity_summary(root),
     )
@@ -363,6 +416,38 @@ def parse_flex_xml(xml_text: str) -> FlexData:
 # Public entry point
 # ---------------------------------------------------------------------------
 
+def _load_cache(cache_path: Optional[str], max_age_hours: float) -> Optional["FlexData"]:
+    """Return the parsed cache if it exists and is fresh enough, else None."""
+    if not cache_path or not os.path.exists(cache_path):
+        return None
+    age_hours = (time.time() - os.path.getmtime(cache_path)) / 3600
+    if age_hours >= max_age_hours:
+        return None
+    try:
+        with open(cache_path, encoding="utf-8") as f:
+            parsed = parse_flex_xml(f.read())
+    except (OSError, ET.ParseError, ValueError) as exc:
+        print(f"[WARN] Ignoring unreadable Flex cache {cache_path}: {exc}")
+        return None
+    print(f"Using cached Flex data ({age_hours:.1f}h old): {cache_path}")
+    return parsed
+
+
+def _load_stale_cache(cache_path: Optional[str], reason: str) -> Optional["FlexData"]:
+    """Serve the cache regardless of age after a failed/blocked live fetch."""
+    if not cache_path or not os.path.exists(cache_path):
+        return None
+    age_hours = (time.time() - os.path.getmtime(cache_path)) / 3600
+    try:
+        with open(cache_path, encoding="utf-8") as f:
+            parsed = parse_flex_xml(f.read())
+    except (OSError, ET.ParseError, ValueError) as exc:
+        print(f"[WARN] Stale Flex cache is unreadable {cache_path}: {exc}")
+        return None
+    print(f"[WARN] {reason}; serving stale cache ({age_hours:.1f}h old): {cache_path}")
+    return parsed
+
+
 def load_flex_data(
     token: Optional[str] = None,
     query_id: Optional[str] = None,
@@ -370,7 +455,14 @@ def load_flex_data(
     max_cache_age_hours: float = 4.0,
 ) -> FlexData:
     """
-    Fetch Flex data from IBKR, with optional file-based caching.
+    Fetch Flex data from IBKR, with file-based caching and failure hardening.
+
+    Live fetches are serialised through a process-wide lock — concurrent
+    callers wait, then reuse the cache the first fetch wrote — because IBKR
+    rejects overlapping report requests and repeated failures trip a "1025
+    Too many failed attempts" lockout. After a failure a cooldown is imposed
+    (2h for a 1025 lockout, 15min otherwise) and the stale cache is served
+    instead of hammering the API.
 
     Args:
         token:               Flex token (falls back to IBKR_FLEX_TOKEN env var).
@@ -384,13 +476,9 @@ def load_flex_data(
     token = token or os.environ.get("IBKR_FLEX_TOKEN", "")
     query_id = query_id or os.environ.get("IBKR_FLEX_QUERY_ID", "")
 
-    # Serve from cache if fresh enough
-    if cache_path and os.path.exists(cache_path):
-        age_hours = (time.time() - os.path.getmtime(cache_path)) / 3600
-        if age_hours < max_cache_age_hours:
-            print(f"Using cached Flex data ({age_hours:.1f}h old): {cache_path}")
-            with open(cache_path, encoding="utf-8") as f:
-                return parse_flex_xml(f.read())
+    cached = _load_cache(cache_path, max_cache_age_hours)
+    if cached is not None:
+        return cached
 
     if not token:
         raise ValueError(
@@ -403,16 +491,56 @@ def load_flex_data(
             "Find the numeric ID in the Flex Query list in Account Management."
         )
 
-    config = FlexConfig(token=token, query_id=query_id)
-    client = FlexQueryClient(config)
-    xml_text = client.fetch()
+    with _FETCH_LOCK:
+        # The previous lock holder may have just refreshed the cache.
+        cached = _load_cache(cache_path, max_cache_age_hours)
+        if cached is not None:
+            return cached
 
-    if cache_path:
-        with open(cache_path, "w", encoding="utf-8") as f:
-            f.write(xml_text)
-        print(f"Cached Flex data to: {cache_path}")
+        remaining = _COOLDOWN_UNTIL - time.time()
+        if remaining > 0:
+            reason = f"Flex fetch cooling down ({remaining / 60:.0f} min left)"
+            stale = _load_stale_cache(cache_path, reason)
+            if stale is not None:
+                return stale
+            raise RuntimeError(f"{reason} and no cached data available")
 
-    return parse_flex_xml(xml_text)
+        try:
+            config = FlexConfig(token=token, query_id=query_id)
+            client = FlexQueryClient(config)
+            xml_text = client.fetch()
+        except Exception as exc:
+            _set_cooldown(_FAILURE_COOLDOWN_SECONDS)
+            detail = _safe_exception_summary(exc, token, query_id)
+            reason = (
+                f"Flex live fetch failed "
+                f"({type(exc).__name__}: {detail})"
+            )
+            stale = _load_stale_cache(cache_path, reason)
+            if stale is not None:
+                return stale
+            raise
+
+        parsed = parse_flex_xml(xml_text)
+        if cache_path:
+            cache_dir = os.path.dirname(os.path.abspath(cache_path))
+            tmp_path = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=cache_dir,
+                    prefix=".flex-cache-", suffix=".tmp", delete=False
+                ) as f:
+                    tmp_path = f.name
+                    f.write(xml_text)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, cache_path)
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+            print(f"Cached Flex data to: {cache_path}")
+
+        return parsed
 
 
 # ---------------------------------------------------------------------------

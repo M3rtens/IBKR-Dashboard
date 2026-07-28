@@ -18,7 +18,7 @@ from dash import dcc, html, Input, Output, State, ALL, ctx, no_update
 
 from dashboard.app_instance import app
 from dashboard.theme import (BG_CARD, BORDER, ACCENT, RED, T1, T2, T3, T4, T5,
-                             _BENCH, ALLOC_HEX)
+                             _BENCH, ALLOC_HEX, DEMO_MODE)
 from dashboard.charts import build_main_chart, _align_bench
 from dashboard.data import get_data, _bench_series
 
@@ -450,10 +450,12 @@ def _dd_fig(dates, values, bench_data=None, active_bench=None):
             aligned = _align_bench(bd["dates"], bd["values"], dates)
             if aligned and aligned[0]:
                 raw_bench = aligned
-        if raw_bench is None:
+        if raw_bench is None and DEMO_MODE:
             raw_bench = _bench_series(bm["seed"], bm["drift"], bm["vol"], bm["shock"])
             n = len(dates)
             raw_bench = raw_bench[-n:]
+        if raw_bench is None:
+            continue
 
         bench_dd = _compute_dd(raw_bench)
         fig.add_trace(go.Scatter(
@@ -657,13 +659,13 @@ def _populate_performance(_n, range_key, active_bench):
         d_ann = (ps["ann"] - bs["ann"]) if bs else ps["ann"]
         kpis = [_kpi_card(k) for k in [
             dict(label="Annualised Return", tag="TWR", tagColor=tag_c, tagBg=tag_bg,
-                 value=_pct(ps["ann"] * 100), color=POS,
+                 value=_pct(ps["ann"] * 100), color=col(ps["ann"]),
                  sub=_pct(d_ann * 100, True), subColor=col(d_ann),
                  subNote=f"vs {bench_name}" if bs else "annualised"),
             dict(label="Total Return", tag="SINCE INCEPTION", tagColor=tag_c, tagBg=tag_bg,
                  value=_pct(ps["total"] * 100), color=col(ps["total"]),
-                 sub=_money(start_v * ps["total"], True), subColor=col(ps["total"]),
-                 subNote=f"on {_money(start_v)}"),
+                  sub=_money(series[0] * ps["total"], True), subColor=col(ps["total"]),
+                  subNote=f"on {_money(series[0])}"),
             dict(label="Sharpe Ratio", tag="RF 4%", tagColor=tag_c, tagBg=tag_bg,
                  value=f"{ps['sharpe']:.2f}", color=T1,
                  sub=("—" if bs is None else f"{bs['sharpe']:.2f}"), subColor=T2,

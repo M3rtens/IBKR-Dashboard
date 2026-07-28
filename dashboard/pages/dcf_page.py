@@ -375,7 +375,12 @@ def _seed_model(symbol):
     name = info.get("longName") or info.get("shortName") or symbol
     ccy = ccy_symbol(info.get("currency") or info.get("financialCurrency"))
 
-    base_rev = _safe(_df_val(income, "Total Revenue", "Operating Revenue"), 1e9)
+    raw_base_rev = _df_val(income, "Total Revenue", "Operating Revenue")
+    if raw_base_rev is None or _safe(raw_base_rev, 0) <= 0:
+        error = "Financial statements are unavailable; no DCF was generated."
+        return (f"{name} ({symbol}) — data unavailable",
+                {"error": error}, no_update, no_update, None, None, None)
+    base_rev = _safe(raw_base_rev, 0)
     prev_rev = _safe(_df_val_at(income, 1, "Total Revenue", "Operating Revenue"), 0)
     ebit = _safe(_df_val(income, "EBIT", "Operating Income"), 0)
     pretax = _safe(_df_val(income, "Pretax Income", "Pretax Income Loss"), 0)
@@ -406,7 +411,7 @@ def _seed_model(symbol):
 
     # Assumptions seeded from the info block where available.
     shares = info.get("sharesOutstanding")
-    shares_m = round(shares / 1e6, 1) if shares else 1000
+    shares_m = round(shares / 1e6, 1) if shares else None
     total_debt = info.get("totalDebt") or 0
     total_cash = info.get("totalCash") or 0
     net_debt_m = round((total_debt - total_cash) / 1e6, 1)
@@ -434,6 +439,9 @@ def _build_drivers(period, model):
     if not model:
         return html.Div("Select a security to build a DCF model.",
             style=dict(color=T4, fontSize="12.5px", padding="12px 0"))
+    if model.get("error"):
+        return html.Div(model["error"],
+            style=dict(color=RED, fontSize="12.5px", padding="12px 0"))
 
     n = _PERIODS.get(period or "5Y", 5)
     seed = model.get("seed", {})
@@ -549,7 +557,7 @@ def _compute(driver_vals, wacc, tgr, tax, shares_m, net_debt_m,
     wacc = (wacc if wacc is not None else 9.0) / 100.0
     tgr = (tgr if tgr is not None else 2.5) / 100.0
     tax = (tax if tax is not None else 25.0) / 100.0
-    shares_m = shares_m if shares_m else 1000
+    shares_m = shares_m if shares_m is not None else 0
     net_debt_m = net_debt_m if net_debt_m is not None else 0
 
     drivers = _gather_drivers(driver_ids, driver_vals, n)

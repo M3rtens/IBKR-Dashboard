@@ -25,7 +25,7 @@ if os.path.exists(".env"):
             _line = _line.strip()
             if _line and not _line.startswith("#") and "=" in _line:
                 _k, _v = _line.split("=", 1)
-                os.environ[_k.strip()] = _v.strip()
+                os.environ.setdefault(_k.strip(), _v.strip())
 
 os.environ["FLASK_SKIP_DOTENV"] = "1"
 

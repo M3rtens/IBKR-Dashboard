@@ -11,6 +11,7 @@ module has no dashboard dependencies, so it can be imported from any layer.
 """
 
 import logging
+import math
 import os
 import threading
 import time
@@ -55,14 +56,20 @@ def yf_ticker(symbol: str, currency: str = "USD", exchange: str = "") -> str:
         return f"{int(digits):04d}.HK" if digits else f"{s}.HK"
     if cur == "JPY" or exch in ("TSEJ", "TSE", "JPX"):
         return f"{s}.T"
-    if cur == "GBP" or exch in ("LSE", "LSEETF"):
+    if cur in ("GBP", "GBX") or exch in ("LSE", "LSEETF"):
         return f"{s}.L"
     if cur == "CAD" or exch in ("TSX", "VENTURE"):
         return f"{s}.TO"
     if cur == "EUR" and exch in ("IBIS", "IBIS2", "XETRA", "FWB"):
         return f"{s}.DE"
-    if cur == "EUR" and exch in ("SBF", "EURONEXT"):
+    if cur == "EUR" and exch in ("SBF", "EURONEXT", "ENEXT", "Euronext"):
         return f"{s}.PA"
+    if cur == "EUR" and exch in ("AEB", "AMS"):
+        return f"{s}.AS"
+    if cur == "EUR" and exch in ("BVME", "MIL"):
+        return f"{s}.MI"
+    if cur == "EUR" and exch in ("EBR", "BRU"):
+        return f"{s}.BR"
     return s  # USD / US default
 
 
@@ -92,7 +99,7 @@ def _history(ticker: str, period: str, interval: str) -> pd.DataFrame:
     now = time.time()
     with _lock:
         c = _hist_cache.get(key)
-        if c and now - c["ts"] < _TTL:
+        if c and now - c["ts"] < (_TTL if not c["data"].empty else _EMPTY_TTL):
             _dbg(f"_history {ticker} {period}/{interval}: cache hit "
                  f"({len(c['data'])} rows)")
             return c["data"]
@@ -112,15 +119,23 @@ def _history(ticker: str, period: str, interval: str) -> pd.DataFrame:
     return df
 
 
-def _extract_closes(data, ticker: str, n_tickers: int) -> list:
+def _extract_closes(data, ticker: str, n_tickers: int,
+                    include_prior_year_close: bool = False) -> list:
     """Pull a clean list of closes for ``ticker`` from a yf.download result."""
     try:
         if data is None or len(data) == 0:
             return []
-        if n_tickers == 1:
-            closes = data["Close"].dropna()
-        else:
-            closes = data[ticker]["Close"].dropna()
+        # group_by="ticker" returns ticker-first MultiIndex columns even when
+        # only one symbol is requested.
+        closes = data[ticker]["Close"].dropna()
+        if include_prior_year_close and not closes.empty:
+            idx = pd.DatetimeIndex(closes.index)
+            if idx.tz is not None:
+                idx = idx.tz_localize(None)
+            cutoff = pd.Timestamp(year=pd.Timestamp.today().year, month=1, day=1)
+            prior = closes[idx < cutoff].tail(1)
+            current = closes[idx >= cutoff]
+            closes = pd.concat([prior, current])
         return [float(v) for v in closes.values]
     except Exception:
         return []
@@ -163,7 +178,8 @@ def get_closes(tickers: list, period: str = "3mo",
         try:
             try:
                 import yfinance as yf
-                data = yf.download(" ".join(missing), period=period,
+                download_period = "1y" if period == "ytd" else period
+                data = yf.download(" ".join(missing), period=download_period,
                                    interval=interval, progress=False,
                                    group_by="ticker", threads=True,
                                    auto_adjust=True, timeout=20)
@@ -174,7 +190,8 @@ def get_closes(tickers: list, period: str = "3mo",
                 data = None
             got, empty = [], []
             for t in missing:
-                closes = _extract_closes(data, t, len(missing))
+                closes = _extract_closes(
+                    data, t, len(missing), include_prior_year_close=(period == "ytd"))
                 with _lock:
                     if closes:
                         # Only cache a successful fetch. yfinance's batch download
@@ -215,26 +232,81 @@ def get_closes(tickers: list, period: str = "3mo",
 
 # --- Holdings: sparklines + daily % change ---------------------------
 
+_yield_cache: dict = {}  # yf_ticker -> {"data": trailing-12m yield %, "ts": epoch}
+
+
+def _dividend_yields(tickers: list) -> dict:
+    """Return ``{yf_ticker: trailing-12m dividend yield in %}`` (cached ~30 min).
+
+    One batched ``yf.download`` with ``actions=True``; the per-ticker Dividends
+    column is summed over the last year and divided by the latest close. Used as
+    a fallback yield for positions that have not paid a dividend yet.
+    """
+    now = time.time()
+    out: dict = {}
+    missing: list = []
+    with _lock:
+        for t in tickers:
+            c = _yield_cache.get(t)
+            if c and now - c["ts"] < _TTL:
+                out[t] = c["data"]
+            else:
+                missing.append(t)
+    if not missing:
+        return out
+    _dbg(f"_dividend_yields: batch download {len(missing)} tickers: {missing}")
+    try:
+        import yfinance as yf
+        data = yf.download(" ".join(missing), period="1y", interval="1d",
+                           progress=False, group_by="ticker", threads=True,
+                           auto_adjust=False, actions=True, timeout=20)
+    except Exception as exc:
+        logger.debug("yfinance dividend download failed: %s", exc)
+        _dbg(f"_dividend_yields: batch EXCEPTION {type(exc).__name__}: {exc}")
+        data = None
+    for t in missing:
+        y = 0.0
+        try:
+            sub = data[t]
+            closes = sub["Close"].dropna()
+            divs = sub["Dividends"].dropna() if "Dividends" in sub else None
+            if not closes.empty and closes.iloc[-1]:
+                y = (float(divs.sum()) if divs is not None else 0.0) \
+                    / float(closes.iloc[-1]) * 100
+        except Exception:
+            y = 0.0
+        with _lock:
+            _yield_cache[t] = {"data": y, "ts": now}
+        out[t] = y
+    return out
+
+
 def get_holdings_market_data(holdings: list) -> dict:
-    """Return ``{ibkr_symbol: {"closes": [...], "day_pct": float}}``.
+    """Return ``{ibkr_symbol: {"closes": [...], "day_pct": float, "div_yield": float}}``.
 
     ``holdings`` is an iterable of ``(symbol, currency, exchange)`` tuples. The
     30-day close series feeds the sparklines; the last two closes give the daily
-    % move (which also drives the "today's movers" panel).
+    % move (which also drives the "today's movers" panel). ``div_yield`` is the
+    trailing-12-month dividend yield in %, used as a fallback for positions that
+    have not paid a dividend yet.
     """
-    mapping: dict = {}  # yf_ticker -> ibkr symbol
+    mapping: dict = {}  # yf_ticker -> [ibkr symbols]
     for sym, cur, exch in holdings:
         t = yf_ticker(sym, cur, exch)
         if t:
-            mapping[t] = sym
+            mapping.setdefault(t, []).append(sym)
     closes_by_t = get_closes(list(mapping), period="3mo")
+    yields = _dividend_yields(list(mapping))
     out: dict = {}
-    for t, sym in mapping.items():
+    for t, symbols in mapping.items():
         closes = closes_by_t.get(t) or []
         day_pct = 0.0
         if len(closes) >= 2 and closes[-2]:
             day_pct = (closes[-1] / closes[-2] - 1) * 100
-        out[sym] = {"closes": closes[-30:], "day_pct": round(day_pct, 2)}
+        div_yield = round(yields.get(t, 0.0), 2)
+        for sym in symbols:
+            out[sym] = {"closes": closes[-30:], "day_pct": round(day_pct, 2),
+                        "div_yield": div_yield}
     return out
 
 
@@ -334,13 +406,20 @@ def _bars_from_history(df: pd.DataFrame, daily: bool) -> list:
         if close != close:  # NaN
             continue
         date_str = str(idx.date()) if (daily and hasattr(idx, "date")) else str(idx)
+        def _finite(value, fallback):
+            try:
+                value = float(value)
+                return value if math.isfinite(value) else fallback
+            except (TypeError, ValueError):
+                return fallback
+
         rows.append({
             "date": date_str,
-            "open": float(r.get("Open", close) or close),
-            "high": float(r.get("High", close) or close),
-            "low": float(r.get("Low", close) or close),
+            "open": _finite(r.get("Open"), close),
+            "high": _finite(r.get("High"), close),
+            "low": _finite(r.get("Low"), close),
             "close": close,
-            "volume": float(r.get("Volume", 0) or 0),
+            "volume": _finite(r.get("Volume"), 0.0),
             "wap": close,
             "barCount": 0,
         })

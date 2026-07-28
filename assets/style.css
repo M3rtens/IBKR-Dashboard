@@ -385,3 +385,28 @@ input[type="number"] {
     cursor: pointer;
     flex-shrink: 0;
 }
+
+/* Income-bar hover tooltip (holdings page dividend income chart) */
+.bar-tip { position: relative; }
+.bar-tip .bar-tip-text {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%) translateY(3px);
+    background: #1c212b;
+    border: 1px solid rgba(255,255,255,0.10);
+    border-radius: 7px;
+    padding: 4px 9px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    color: #e8eaef;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .15s ease, transform .15s ease;
+    z-index: 20;
+}
+.bar-tip:hover .bar-tip-text {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+}

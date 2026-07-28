@@ -166,6 +166,7 @@ def _fetch_news():
         return items
     except Exception as e:
         print(f"[NEWS] fetch failed: {e}")
+        _news_cache["ts"] = now
         return cached or []
 
 
@@ -390,7 +391,6 @@ def _fetch_yf_country_perf() -> list:
             if prev_close <= 0:
                 continue
             change_pct = (close / prev_close - 1.0) * 100
-            change_pct = max(-10, min(10, change_pct))
             results.append({
                 "code": code,
                 "country": name,
@@ -409,10 +409,16 @@ def _fetch_yf_country_perf() -> list:
 
 
 def _fetch_history_bg() -> None:
-    """Background thread: try Flex Query equity summary, then IBKR API reconstruction."""
+    """Background thread: load portfolio history from the Flex Query equity summary.
+
+    If the Flex Query is unavailable or its equity summary is empty, no history
+    is produced — there is deliberately no IBKR API price-reconstruction
+    fallback, since that multiplies current holdings by old prices and draws a
+    misleading multi-year line.
+    """
     import datetime as _dt
 
-    # Optional start-date clip applied to both sources.
+    # Optional start-date clip applied to the history series.
     _start_raw = os.environ.get("IBKR_PORTFOLIO_START", "").strip()
     try:
         _min_date = _dt.date.fromisoformat(_start_raw) if _start_raw else None
@@ -446,13 +452,18 @@ def _fetch_history_bg() -> None:
         flows_by_date = {}
         n_skipped = 0
         if cash_flows is not None and not cash_flows.empty:
+            amount_col = "base_amount" if "base_amount" in cash_flows.columns else "amount"
             for _, row in cash_flows.iterrows():
                 dt = row.get("datetime")
                 if pd.isna(dt):
                     n_skipped += 1
                     continue
                 flow_date = dt.date() if hasattr(dt, "date") else _dt.date.fromisoformat(str(dt)[:10])
-                flows_by_date[flow_date] = flows_by_date.get(flow_date, 0.0) + float(row.get("amount") or 0.0)
+                amount = row.get(amount_col)
+                if pd.isna(amount):
+                    n_skipped += 1
+                    continue
+                flows_by_date[flow_date] = flows_by_date.get(flow_date, 0.0) + float(amount)
 
         total_rows = len(cash_flows) if cash_flows is not None and not cash_flows.empty else 0
         print(f"[TWR] cash flows: {len(flows_by_date)} unique dates used, "
@@ -606,22 +617,10 @@ def _fetch_history_bg() -> None:
                     return
                 print("[HIST] flex equity_summary is EMPTY - enable 'Equity "
                       "Summary by Report Date' in the Flex Query config. "
-                      "Falling back to IBKR API reconstruction.")
+                      "No portfolio history will be shown.")
             except Exception as e:
-                print(f"[WARN] Flex Query failed ({type(e).__name__}: {e}), "
-                      f"falling back to IBKR API")
-
-        print("[HIST] using IBKR API portfolio-history reconstruction")
-        client = get_client()
-        df = client.get_portfolio_history()
-        print(f"[HIST] IBKR API history: {len(df)} rows")
-        if not df.empty:
-            dates  = list(df["date"])
-            values = [float(v) for v in df["value"]]
-            dates, values = _clip(dates, values)
-            result = {"money": (dates, values), "time": (dates, values)}
-            _hist_cache["data"] = result
-            _hist_cache["ts"]   = time.time()
+                print(f"[WARN] Flex Query failed ({type(e).__name__}: {e}); "
+                      f"no portfolio history will be shown")
     finally:
         with _hist_lock:
             _hist_cache["fetching"] = False
@@ -757,9 +756,10 @@ def _calc_income():
         recent = divs[pd.to_datetime(divs["date"], errors="coerce") >= cutoff]
     else:
         return 0.0, 0.0
-    if recent.empty or "amount" not in recent.columns:
+    amount_col = "base_amount" if "base_amount" in recent.columns else "amount"
+    if recent.empty or amount_col not in recent.columns:
         return 0.0, 0.0
-    income = float(recent["amount"].sum())
+    income = float(recent[amount_col].sum())
     return income, 0.0
 
 
@@ -776,9 +776,10 @@ def _calc_symbol_dividends():
         recent = divs[pd.to_datetime(divs["date"], errors="coerce") >= cutoff]
     else:
         return {}
-    if recent.empty or "amount" not in recent.columns or "symbol" not in recent.columns:
+    amount_col = "base_amount" if "base_amount" in recent.columns else "amount"
+    if recent.empty or amount_col not in recent.columns or "symbol" not in recent.columns:
         return {}
-    grouped = recent.groupby("symbol")["amount"].sum()
+    grouped = recent.groupby("symbol")[amount_col].sum()
     return grouped.to_dict()
 
 
@@ -845,7 +846,8 @@ def _live_data() -> DashData:
                         else (client.error or "Disconnected"))
         d.total       = snap.net_liquidation
         d.day_dollar  = snap.day_pnl
-        d.day_pct     = snap.day_pnl/(d.total-snap.day_pnl)*100 if d.total else 0
+        prior_total = d.total - snap.day_pnl
+        d.day_pct = snap.day_pnl / prior_total * 100 if prior_total else 0
         d.unreal      = snap.unrealized_pnl
         d.cost_basis  = snap.gross_position_value - snap.unrealized_pnl
         d.total_return = snap.realized_pnl + snap.unrealized_pnl
@@ -889,8 +891,15 @@ def _live_data() -> DashData:
                 day_pct    = float(row.get("Day Pct") or 0.0)
                 day_dollar = float(row.get("Day P&L") or 0.0)
                 series     = sparklines.get(sym) or _hold_spark(sym, ret*100)
-            ann_div = sym_divs.get(sym, 0.0)
-            div_yield = (ann_div / abs(value) * 100) if value else 0.0
+            if use_yf:
+                # Show the stock's actual trailing 12m market dividend yield,
+                # not the yield of dividends received in this portfolio.
+                div_yield = (md.get(sym) or {}).get("div_yield", 0.0)
+            else:
+                # IBKR source has no yield feed — fall back to trailing 12m
+                # dividends received over current market value.
+                ann_div = sym_divs.get(sym, 0.0)
+                div_yield = (ann_div / abs(value) * 100) if value else 0.0
             holdings.append({
                 "ticker":sym,"name":desc,"cls":"Equities","value":value,"cost":cost,
                 "day_pct":day_pct,"day_dollar":day_dollar,"ret":ret,"ret_dollar":upnl,
@@ -899,8 +908,11 @@ def _live_data() -> DashData:
                 "div_yield":div_yield,
             })
         d.holdings = sorted(holdings, key=lambda h: abs(h["value"]), reverse=True)
-        d.allocation = [{"name":"Securities","value":snap.gross_position_value},
-                        {"name":"Cash","value":snap.total_cash}]
+        d.allocation = [{"name":"Securities","value":max(snap.gross_position_value, 0)}]
+        if snap.total_cash >= 0:
+            d.allocation.append({"name":"Cash","value":snap.total_cash})
+        else:
+            d.allocation.append({"name":"Margin debt","value":abs(snap.total_cash)})
         hist = _get_port_history()
         dates, values = hist.get("money", ([], []))
         time_dates, time_values = hist.get("time", (dates, values))
@@ -1057,7 +1069,7 @@ def get_portfolio_metrics(holdings: list) -> dict:
                 f = float(val)
             except (TypeError, ValueError):
                 continue
-            if f != f or f <= 0:
+            if f != f or (fmt == "ratio" and f <= 0):
                 continue
             w_sum  += w * f
             w_covd += w
