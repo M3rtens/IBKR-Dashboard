@@ -81,6 +81,7 @@ def cgt_page():
         html.Div(id="cgt-table-wrap",
             style=dict(background=BG_CARD,border=f"1px solid {BORDER}",
                        borderRadius="14px",overflow="hidden")),
+        html.Div(id="cgt-income"),
         dcc.Download(id="cgt-download"),
     ], style=dict(padding="24px 28px 40px",display="flex",
                   flexDirection="column",gap="16px"))
@@ -107,6 +108,7 @@ def set_fy_range(_cur, _prev):
 @app.callback(
     Output("cgt-summary","children"),
     Output("cgt-table-wrap","children"),
+    Output("cgt-income","children"),
     Output("cgt-data-store","data"),
     Input("cgt-generate","n_clicks"),
     State("cgt-start","date"),
@@ -115,19 +117,19 @@ def set_fy_range(_cur, _prev):
 )
 def generate_cgt_report(n, start_date, end_date):
     if not start_date or not end_date:
-        return html.Div("Please select a date range.", style=dict(color=RED)), html.Div(), None
+        return html.Div("Please select a date range.", style=dict(color=RED)), html.Div(), html.Div(), None
     from services.flex_query import load_flex_data
     from services import cgt
     flex_token = os.environ.get("IBKR_FLEX_TOKEN", "")
     flex_qid = os.environ.get("IBKR_FLEX_QUERY_ID", "")
     if not flex_token or not flex_qid:
-        return html.Div("Flex Query credentials not configured.", style=dict(color=RED)), html.Div(), None
+        return html.Div("Flex Query credentials not configured.", style=dict(color=RED)), html.Div(), html.Div(), None
     try:
         fd = load_flex_data(flex_token, flex_qid)
     except Exception as e:
-        return html.Div(f"Failed to load Flex data: {e}", style=dict(color=RED)), html.Div(), None
+        return html.Div(f"Failed to load Flex data: {e}", style=dict(color=RED)), html.Div(), html.Div(), None
     if fd.trades.empty:
-        return html.Div("No trade data found.", style=dict(color=T4)), html.Div(), None
+        return html.Div("No trade data found.", style=dict(color=T4)), html.Div(), html.Div(), None
 
     start_dt = _dt.date.fromisoformat(start_date)
     end_dt = _dt.date.fromisoformat(end_date)
@@ -135,9 +137,10 @@ def generate_cgt_report(n, start_date, end_date):
     if res.parcels.empty:
         return (html.Div("No sell transactions in the selected period.",
                     style=dict(color=T4,fontSize="13px",padding="20px 28px")),
-                html.Div(), None)
+                html.Div(), html.Div(), None)
 
-    p = res.parcels.sort_values(["sell_date", "symbol"]).reset_index(drop=True)
+    p = res.parcels.sort_values(["sell_date", "symbol"],
+                                ascending=[False, True]).reset_index(drop=True)
     s = cgt.summarise(p)
     eligible_raw = float(p.loc[p["discount_eligible"], "gain_aud"].sum())
 
@@ -257,7 +260,100 @@ def generate_cgt_report(n, start_date, end_date):
             style=dict(fontSize="11px",color=T5,padding="10px 12px")))
     table = html.Div([header] + data_rows,
         style=dict(maxHeight="500px",overflowY="auto"))
-    return summary, table, recs
+
+    # -- ordinary income: dividends received in the window -----------------
+    # Dividends are not CGT events — they are ordinary income — so they get
+    # their own section. Gross dividend and its withholding-tax line are
+    # netted per symbol+pay date but shown in separate columns: the gross is
+    # the assessable amount and the withheld tax is the foreign income tax
+    # offset claim.
+    income_ui, income_recs = html.Div(), []
+    divs = fd.dividends
+    if not divs.empty:
+        d = divs.copy()
+        d["_date"] = d["datetime"].dt.date
+        d = d[(d["_date"] >= start_dt) & (d["_date"] <= end_dt)]
+        if not d.empty:
+            if "base_amount" in d.columns:
+                d["_aud"] = d["base_amount"].fillna(
+                    d["amount"] * d["fx_rate"].where(d["fx_rate"] > 0, 1.0))
+            else:
+                d["_aud"] = d["amount"] * d["fx_rate"].where(d["fx_rate"] > 0, 1.0)
+            is_wht = d["type"] == "Withholding Tax"
+            d["_gross_aud"] = d["_aud"].where(~is_wht, 0.0)
+            d["_wht_aud"]   = d["_aud"].where(is_wht, 0.0)
+            d["_gross_loc"] = d["amount"].where(~is_wht, 0.0)
+            d["_wht_loc"]   = d["amount"].where(is_wht, 0.0)
+            grp = d.groupby(["symbol", "_date"], as_index=False).agg(
+                gross_aud=("_gross_aud", "sum"), wht_aud=("_wht_aud", "sum"),
+                gross_loc=("_gross_loc", "sum"), wht_loc=("_wht_loc", "sum"),
+                desc=("description", "first"),
+            ).sort_values("_date", ascending=False)
+
+            tot_gross = float(grp["gross_aud"].sum())
+            tot_wht   = float(grp["wht_aud"].sum())      # negative
+            inc_summary = html.Div([
+                _sum_cell("Gross Dividends", tot_gross, ACCENT),
+                _sum_cell("Foreign Tax Withheld", tot_wht, RED,
+                          sub="foreign income tax offset"),
+                _sum_cell("Net Received", tot_gross + tot_wht),
+                _sum_cell("Payments", 0, display=f"{len(grp):,}"),
+            ], style=dict(display="grid",gridTemplateColumns="repeat(4,1fr)",
+                          gap="14px",padding="16px 28px 4px"))
+
+            inc_grid = "90px 70px 1fr 100px 110px 100px"
+            inc_header = html.Div([
+                html.Div("Paid", style=dict(**col_left,**hdr)),
+                html.Div("Symbol", style=dict(**col_left,**hdr)),
+                html.Div("Description", style=dict(**col_left,**hdr)),
+                html.Div("Gross (AUD)", style=dict(**col_style,**hdr)),
+                html.Div("Withheld (AUD)", style=dict(**col_style,**hdr)),
+                html.Div("Net (AUD)", style=dict(**col_style,**hdr)),
+            ], style=dict(display="grid",gridTemplateColumns=inc_grid,gap="0"))
+            inc_rows = []
+            for _, r in grp.iterrows():
+                net = r["gross_aud"] + r["wht_aud"]
+                income_recs.append({
+                    "Pay Date": r["_date"].strftime("%d/%m/%Y"),
+                    "Symbol": r["symbol"],
+                    "Description": str(r["desc"])[:40],
+                    "Gross (Local)": round(float(r["gross_loc"]), 2),
+                    "Withheld (Local)": round(float(r["wht_loc"]), 2),
+                    "Gross (AUD)": round(float(r["gross_aud"]), 2),
+                    "Withheld (AUD)": round(float(r["wht_aud"]), 2),
+                    "Net (AUD)": round(float(net), 2),
+                })
+                inc_rows.append(html.Div([
+                    html.Div(r["_date"].strftime("%d/%m/%Y"),
+                        style={**col_left,"fontSize":"12px","color":T3}),
+                    html.Div(r["symbol"], style={**col_left,"fontSize":"12px","fontWeight":"600"}),
+                    html.Div(str(r["desc"])[:40],
+                        style={**col_left,"fontSize":"12px","color":T3,
+                               "overflow":"hidden","textOverflow":"ellipsis",
+                               "whiteSpace":"nowrap"}),
+                    html.Div(money(r["gross_aud"]),
+                        style={**col_style,"fontSize":"12px","color":T3}),
+                    html.Div(money(r["wht_aud"], signed=True),
+                        style={**col_style,"fontSize":"12px","color":RED}),
+                    html.Div(money(net),
+                        style={**col_style,"fontSize":"12px","fontWeight":"600"}),
+                ], style=dict(display="grid",gridTemplateColumns=inc_grid,gap="0",
+                    borderBottom="1px solid rgba(255,255,255,0.04)")))
+            income_ui = html.Div([
+                html.Div("Ordinary Income — Dividends", style=dict(
+                    fontSize="14px",fontWeight="600",padding="16px 28px 0",
+                    fontFamily="'Space Grotesk',sans-serif")),
+                html.Div("Assessable income, not a CGT event — report separately from capital gains",
+                    style=dict(fontSize="11px",color=T5,padding="4px 28px 0")),
+                inc_summary,
+                html.Div([inc_header] + inc_rows,
+                    style=dict(maxHeight="300px",overflowY="auto",
+                               marginTop="10px")),
+            ], style=dict(background=BG_CARD,border=f"1px solid {BORDER}",
+                          borderRadius="14px",overflow="hidden",
+                          paddingBottom="10px"))
+
+    return summary, table, income_ui, {"disposals": recs, "income": income_recs}
 
 
 @app.callback(
@@ -271,7 +367,8 @@ def export_cgt_xlsx(n, data):
         return no_update
     import io
     from services import cgt as _cgt
-    df = pd.DataFrame(data)
+    df = pd.DataFrame(data.get("disposals") or [])
+    income = pd.DataFrame(data.get("income") or [])
 
     gl = df["Gain/Loss (AUD)"]
     eligible = df["Discount Eligible"] == "Yes"
@@ -328,10 +425,38 @@ def export_cgt_xlsx(n, data):
                                    "recorded acquisitions."),
     ], columns=["Item", "Value"])
 
+    # Ordinary income block: dividends are assessable income, not CGT events.
+    if not income.empty:
+        inc_totals = {c: "" for c in income.columns}
+        inc_totals.update({
+            "Symbol": "TOTAL",
+            "Gross (AUD)": round(income["Gross (AUD)"].sum(), 2),
+            "Withheld (AUD)": round(income["Withheld (AUD)"].sum(), 2),
+            "Net (AUD)": round(income["Gross (AUD)"].sum()
+                               + income["Withheld (AUD)"].sum(), 2),
+        })
+        income_out = pd.concat([income, pd.DataFrame([inc_totals])],
+                               ignore_index=True)
+        gross_aud = float(income["Gross (AUD)"].sum())
+        wht_aud   = float(income["Withheld (AUD)"].sum())
+        summary = pd.concat([summary, pd.DataFrame([
+            ("", ""),
+            ("Ordinary income", ""),
+            ("Gross dividends (AUD)",  round(gross_aud, 2)),
+            ("Foreign tax withheld (AUD)", round(wht_aud, 2)),
+            ("Net dividends received (AUD)", round(gross_aud + wht_aud, 2)),
+            ("Dividend note",          "Dividends are ordinary income, not "
+                                       "capital gains — declare as foreign "
+                                       "source income; the withheld tax may be "
+                                       "claimable as a foreign income tax offset."),
+        ], columns=["Item", "Value"])], ignore_index=True)
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         summary.to_excel(writer, index=False, sheet_name="Summary")
         disposals.to_excel(writer, index=False, sheet_name="Disposals")
+        if not income.empty:
+            income_out.to_excel(writer, index=False, sheet_name="Income")
     fname = f"capital_gains_{dates.min().strftime('%Y%m%d')}_{dates.max().strftime('%Y%m%d')}.xlsx" \
             if dates.notna().any() else "capital_gains_report.xlsx"
     return dcc.send_bytes(output.getvalue(), filename=fname)
