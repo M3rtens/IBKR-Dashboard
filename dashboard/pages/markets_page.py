@@ -20,6 +20,7 @@ so the page fills itself in without a manual browser refresh.
 
 import datetime
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 
 from dash import dcc, html, Input, Output, State, ALL, ctx, no_update
 
@@ -549,7 +550,7 @@ def _next_sort(spec: dict, col: str) -> dict:
 
 
 def _build_summary(sort_state: dict = None):
-    """Fetch every instrument (two batched calls) and build the page body.
+    """Fetch every instrument (two concurrent batched calls) and build the page body.
 
     ``sort_state`` maps a group title to its {"col","asc"} sort spec; groups
     without an entry keep registry order. Returns (blocks, n_loaded, n_total)
@@ -559,11 +560,16 @@ def _build_summary(sort_state: dict = None):
     """
     sort_state = sort_state or {}
     all_tickers = [t for _, rows in _GROUPS for t, _, _, _ in rows]
-    closes_by_t = market_data.get_closes(all_tickers, period="1y")
-    try:
-        ytd_by_t = market_data.get_closes(all_tickers, period="ytd")
-    except Exception:
-        ytd_by_t = {}
+    # The 1y and ytd batches are independent downloads — fetch them on two
+    # workers so the page build waits for the slower one, not the sum of both.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_1y = pool.submit(market_data.get_closes, all_tickers, "1y")
+        try:
+            ytd_by_t = pool.submit(market_data.get_closes,
+                                   all_tickers, "ytd").result()
+        except Exception:
+            ytd_by_t = {}
+        closes_by_t = fut_1y.result()
     n_total  = len(all_tickers)
     n_loaded = sum(1 for t in all_tickers
                    if len(closes_by_t.get(t) or []) >= 2)
