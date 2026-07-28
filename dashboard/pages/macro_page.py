@@ -366,21 +366,30 @@ def _build_us():
         # Rates
         ("FEDFUNDS", 120), ("DGS2", 2600), ("DGS10", 2600), ("DGS30", 2600),
         ("T10Y2Y", 2600), ("T10Y3M", 2600), ("T5YIFR", 2600),
+        ("DFII10", 2600),  # 10Y TIPS real yield
+        ("MORTGAGE30US", 500),  # 30Y fixed mortgage, weekly
         # Inflation
         ("CPIAUCSL", 240), ("PCEPILFE", 240), ("T10YIE", 2600),
-        # Credit
+        ("DCOILWTICO", 2600),  # WTI crude, daily
+        # Credit & stress
         ("BAMLC0A0CM", 2600), ("BAMLH0A0HYM2", 2600),
         ("NFCI", 520),       # financial conditions, weekly
+        ("VIXCLS", 2600),    # implied volatility, daily
         # Labour
         ("UNRATE", 240), ("PAYEMS", 240), ("ICSA", 500), ("JTSJOL", 240),
+        ("SAHMREALTIME", 240),  # Sahm-rule recession signal
         # Growth
-        ("GDPC1", 120), ("INDPRO", 240), ("USSLIND", 240),
+        ("GDPC1", 120), ("INDPRO", 240),
+        # USSLIND (Conference Board LEI) was dropped from FRED in 2020 —
+        # the OECD US composite leading indicator is the maintained equivalent.
+        ("USALOLITOAASTSAM", 240),
         # Housing & consumer
         ("HOUST", 240),      # housing starts, thousands
         ("RSAFS", 240),      # retail sales, $M
         ("UMCSENT", 240),    # consumer sentiment
         # FX & Liquidity
         ("DTWEXBGS", 2600), ("M2SL", 240),
+        ("WALCL", 520),      # Fed balance sheet, weekly, $M
     ])
     def _f(sid, limit):
         return f.get((sid, limit), [])
@@ -392,23 +401,28 @@ def _build_us():
     t10y2y    = _f("T10Y2Y",       2600)
     t10y3m    = _f("T10Y3M",       2600)
     t5yifr    = _f("T5YIFR",       2600)
+    dfii10    = _f("DFII10",       2600)
+    mort30    = _f("MORTGAGE30US", 500)
     # Inflation
     cpi       = _f("CPIAUCSL",     240)
     pce       = _f("PCEPILFE",     240)
     t10yie    = _f("T10YIE",       2600)
-    # Credit
+    wti       = _f("DCOILWTICO",   2600)
+    # Credit & stress
     ig_oas    = _f("BAMLC0A0CM",   2600)
     hy_oas    = _f("BAMLH0A0HYM2", 2600)
     nfci      = _f("NFCI",         520)
+    vix       = _f("VIXCLS",       2600)
     # Labour
     unrate    = _f("UNRATE",       240)
     payems    = _f("PAYEMS",       240)
     icsa      = _f("ICSA",         500)
     jtsjol    = _f("JTSJOL",       240)
+    sahm      = _f("SAHMREALTIME", 240)
     # Growth
     gdpc1     = _f("GDPC1",        120)
     indpro    = _f("INDPRO",       240)
-    usslind   = _f("USSLIND",      240)
+    uscli     = _f("USALOLITOAASTSAM", 240)
     # Housing & consumer
     houst     = _f("HOUST",        240)
     rsafs     = _f("RSAFS",        240)
@@ -416,6 +430,7 @@ def _build_us():
     # FX & Liquidity
     dtwexbgs  = _f("DTWEXBGS",     2600)
     m2sl      = _f("M2SL",         240)
+    walcl     = _f("WALCL",        520)
 
     # Derived series
     cpi_yoy    = _yoy(cpi)
@@ -425,24 +440,31 @@ def _build_us():
     jtsjol_m   = _scale(jtsjol, 1 / 1_000)
     gdp_yoy    = _yoy_q(gdpc1)
     indpro_yoy = _yoy(indpro)
-    lei_yoy    = _yoy(usslind)
+    lei_yoy    = _yoy(uscli)
     m2_yoy     = _yoy(m2sl)
     retail_yoy = _yoy(rsafs)
+    walcl_t    = _scale(walcl, 1 / 1_000_000)  # $M → $T
 
-    # Gauges — two rows of six
+    # Gauges — three rows of six
     gauge_specs = [
         ("Fed Funds",       fedfunds,  "%",  3,  False, 2),
         ("10Y UST",         dgs10,     "%",  63, False, 2),
         ("10Y–2Y Spread",   t10y2y,    "pp", 63, False, 2),
+        ("10Y Real",        dfii10,    "%",  63, False, 2),
+        ("30Y Mortgage",    mort30,    "%",  12, True,  2),
         ("CPI (YoY)",       cpi_yoy,   "%",  3,  True,  2),
         ("Core PCE (YoY)",  pce_yoy,   "%",  3,  True,  2),
         ("Unemployment",    unrate,    "%",  3,  True,  2),
+        ("Sahm Rule",       sahm,      "",   3,  True,  2),
         ("NFP MoM",         nfp_mom,   "K",  1,  False, 0),
         ("Init. Claims",    icsa_k,    "K",  4,  True,  0),
         ("JOLTS Openings",  jtsjol_m,  "M",  3,  False, 2),
         ("Real GDP (YoY)",  gdp_yoy,   "%",  2,  False, 2),
+        ("WTI ($/bbl)",     wti,       "",   63, False, 2),
+        ("VIX",             vix,       "",   63, True,  1),
         ("USD Index",       dtwexbgs,  "",   63, False, 1),
         ("M2 (YoY)",        m2_yoy,    "%",  3,  False, 2),
+        ("Fed BS",          walcl_t,   "T",  12, True,  2),
     ]
     gauges = _build_gauge_tiles(gauge_specs)
 
@@ -451,12 +473,14 @@ def _build_us():
     # Interest Rates
     r_ff, r_2y, r_10y, r_30y = (_recent(fedfunds, 5), _recent(dgs2, 5),
                                 _recent(dgs10, 5), _recent(dgs30, 5))
+    r_real = _recent(dfii10, 5)
     if r_ff or r_10y or r_2y:
         fig = go.Figure([
             _trace(r_ff,  "Fed Funds", "#7fb2ff", step=True),
             _trace(r_2y,  "2Y UST",    "#e8b86d"),
             _trace(r_10y, "10Y UST",   ACCENT),
             _trace(r_30y, "30Y UST",   "#c084fc"),
+            _trace(r_real, "10Y Real (TIPS)", "#f472b6", dash="dash"),
         ])
         fig.update_layout(**_base_layout())
     else:
@@ -490,7 +514,7 @@ def _build_us():
         fig = go.Figure([
             _trace(r_gdp,    "Real GDP YoY",      ACCENT,    width=2.2),
             _trace(r_indpro, "Indust. Prod. YoY", "#e8b86d"),
-            _trace(r_lei,    "LEI YoY",           "#c084fc", dash="dash"),
+            _trace(r_lei,    "OECD CLI YoY",      "#c084fc", dash="dash"),
             _ref_line(ref, 0.0, "Zero"),
         ])
         fig.update_layout(**_base_layout())
@@ -534,29 +558,37 @@ def _build_us():
     cards.append(_fig_card("Labour Market", fig))
 
     # FX & Liquidity
-    r_m2, r_usd = _recent(m2_yoy, 5), _recent(dtwexbgs, 5)
+    r_m2, r_usd, r_bs = (_recent(m2_yoy, 5), _recent(dtwexbgs, 5),
+                         _recent(walcl_t, 5))
     if r_m2 or r_usd:
         fig = go.Figure([
             _trace(r_m2,  "M2 YoY",    "#34d399"),
             _trace(r_usd, "USD Index", "#e8b86d", yaxis="y2"),
+            _trace(r_bs,  "Fed BS ($T, rhs2)", "#7fb2ff", dash="dash",
+                   yaxis="y3"),
         ])
         fig.update_layout(**_base_layout(
             yaxis2=dict(overlaying="y", side="right", showgrid=False,
                         zeroline=False, tickfont=dict(size=10, color=T4),
                         ticksuffix=""),
+            yaxis3=dict(overlaying="y", side="right", showgrid=False,
+                        zeroline=False, showticklabels=False, position=1.0),
         ))
     else:
         fig = _empty_fig("No data")
     cards.append(_fig_card("FX & Liquidity", fig))
 
     # Yield Curve & Recession Signal
-    r_c2y, r_c3m = _recent(t10y2y, 8), _recent(t10y3m, 8)
+    r_c2y, r_c3m, r_sahm = (_recent(t10y2y, 8), _recent(t10y3m, 8),
+                            _recent(sahm, 8))
     if r_c2y or r_c3m:
         ref = r_c2y or r_c3m
         fig = go.Figure([
-            _trace(r_c2y, "10Y–2Y", ACCENT),
-            _trace(r_c3m, "10Y–3M", "#7fb2ff"),
+            _trace(r_c2y,  "10Y–2Y",    ACCENT),
+            _trace(r_c3m,  "10Y–3M",    "#7fb2ff"),
+            _trace(r_sahm, "Sahm Rule", "#fb923c", dash="dash"),
             _ref_line(ref, 0.0, "Inversion (0)"),
+            _ref_line(r_sahm or ref, 0.5, "Sahm trigger (0.5)"),
         ])
         fig.update_layout(**_base_layout(yaxis=dict(
             showgrid=True, gridcolor="rgba(255,255,255,0.04)",
@@ -586,6 +618,39 @@ def _build_us():
     else:
         fig = _empty_fig("No data")
     cards.append(_fig_card("Housing & Consumer", fig))
+
+    # Mortgage rate vs 10Y UST (the spread is the lending margin)
+    r_mort, r_10y_m = _recent(mort30, 10), _recent(dgs10, 10)
+    if r_mort:
+        fig = go.Figure([
+            _trace(r_mort,  "30Y Fixed Mortgage", "#e8b86d"),
+            _trace(r_10y_m, "10Y UST",            ACCENT, dash="dash"),
+        ])
+        fig.update_layout(**_pct_axis_layout())
+    else:
+        fig = _empty_fig("No data")
+    cards.append(_fig_card("Mortgage Rate", fig))
+
+    # WTI crude — headline energy input into inflation
+    r_wti = _recent(wti, 5)
+    if r_wti:
+        fig = go.Figure([_trace(r_wti, "WTI ($/bbl)", "#fb923c")])
+        fig.update_layout(**_plain_axis_layout(""))
+    else:
+        fig = _empty_fig("No data")
+    cards.append(_fig_card("WTI Crude Oil", fig))
+
+    # VIX — implied-volatility fear gauge
+    r_vix = _recent(vix, 5)
+    if r_vix:
+        fig = go.Figure([
+            _trace(r_vix, "VIX", "#f472b6"),
+            _ref_line(r_vix, 20.0, "Elevated (20)"),
+        ])
+        fig.update_layout(**_plain_axis_layout(""))
+    else:
+        fig = _empty_fig("No data")
+    cards.append(_fig_card("Market Volatility (VIX)", fig))
 
     return gauges, cards
 
