@@ -16,7 +16,7 @@ from dash import dcc, html, Input, Output, State, no_update, ctx
 
 from dashboard.app_instance import app
 from dashboard.theme import BG_CARD, BORDER, ACCENT, RED, T1, T2, T3, T4, T5
-from dashboard.formatters import money
+from dashboard.formatters import money, price_money
 
 
 def _au_fy(today: _dt.date) -> tuple:
@@ -293,10 +293,13 @@ def generate_cgt_report(n, start_date, end_date):
             tot_gross = float(grp["gross_aud"].sum())
             tot_wht   = float(grp["wht_aud"].sum())      # negative
             inc_summary = html.Div([
-                _sum_cell("Gross Dividends", tot_gross, ACCENT),
-                _sum_cell("Foreign Tax Withheld", tot_wht, RED,
+                _sum_cell("Gross Dividends", 0, ACCENT,
+                          display=price_money(tot_gross)),
+                _sum_cell("Foreign Tax Withheld", 0, RED,
+                          display=price_money(tot_wht),
                           sub="foreign income tax offset"),
-                _sum_cell("Net Received", tot_gross + tot_wht),
+                _sum_cell("Net Received", 0,
+                          display=price_money(tot_gross + tot_wht)),
                 _sum_cell("Payments", 0, display=f"{len(grp):,}"),
             ], style=dict(display="grid",gridTemplateColumns="repeat(4,1fr)",
                           gap="14px",padding="16px 28px 4px"))
@@ -331,11 +334,11 @@ def generate_cgt_report(n, start_date, end_date):
                         style={**col_left,"fontSize":"12px","color":T3,
                                "overflow":"hidden","textOverflow":"ellipsis",
                                "whiteSpace":"nowrap"}),
-                    html.Div(money(r["gross_aud"]),
+                    html.Div(price_money(r["gross_aud"]),
                         style={**col_style,"fontSize":"12px","color":T3}),
-                    html.Div(money(r["wht_aud"], signed=True),
+                    html.Div(price_money(r["wht_aud"]),
                         style={**col_style,"fontSize":"12px","color":RED}),
-                    html.Div(money(net),
+                    html.Div(price_money(net),
                         style={**col_style,"fontSize":"12px","fontWeight":"600"}),
                 ], style=dict(display="grid",gridTemplateColumns=inc_grid,gap="0",
                     borderBottom="1px solid rgba(255,255,255,0.04)")))
